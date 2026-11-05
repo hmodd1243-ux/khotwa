@@ -620,6 +620,8 @@ document.addEventListener('click',e=>{if(glossPop&&!glossPop.contains(e.target))
 
 // ---------- Speaking widget ----------
 // Live-highlights each expected word as it is heard; finishes the moment the full target is heard.
+function diagText(){return ['v2.4','UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}
+function diagBox(){const out=h('pre',{class:'diagout',dir:'ltr'});return h('div',{class:'diag'},h('button',{type:'button',class:'btn sm ghost',onclick:()=>{out.textContent=diagText();}},'أظهر التفاصيل للمطوّر'),out);}
 function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=true}){
  const box=h('div',{class:'speak'});
  const target=h('div',{class:'target',dir:'ltr',lang:'en'});
@@ -645,7 +647,7 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
    'اسمح للميكروفون: الإعدادات ← Safari ← الميكروفون ← سماح',
    Ear.isStandalone()?'أنت تفتح التطبيق من أيقونة الشاشة الرئيسية، والتعرف على الكلام فيها أضعف، جرّب فتح الرابط في Safari مباشرة':'افصل سماعات البلوتوث إن كانت متصلة',
   ]:['تكلم بصوت واضح وقريب من الجهاز','تأكد من السماح للميكروفون في إعدادات المتصفح','التعرف على الكلام يحتاج اتصالًا بالإنترنت'];
-  help.replaceChildren(...[h('b',null,'لا يلتقط صوتك؟'),h('ul',null,tips.map(t=>h('li',null,t))),canRecord()?recorder():null].filter(Boolean));
+  help.replaceChildren(...[h('b',null,'لا يلتقط صوتك؟'),h('ul',null,tips.map(t=>h('li',null,t))),canRecord()?recorder():null,diagBox()].filter(Boolean));
   help.classList.remove('hidden');
  }
  // Fallback that always works: record yourself, compare with the model voice, judge it yourself.
@@ -682,7 +684,7 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
   if(res.error&&!res.text){
    deaf++;setState('idle',Ear.errorText(res.error));
    if(res.error==='unsupported'||res.error==='not-allowed'||res.error==='service-not-allowed'){typeWrap.classList.remove('hidden');showHelp();}
-   else if(deaf>=2)showHelp();
+   else if(deaf>=(Ear.isIOS?1:2))showHelp();
    return;
   }
   deaf=0;heard.textContent=res.text;paint(res.matched);
@@ -1180,8 +1182,7 @@ function viewSettings(m){
   h('input',{type:'checkbox',checked:!!S.settings[key],onchange:e=>{S.settings[key]=e.target.checked;save();}}));
  const rate=h('select',{onchange:e=>{S.settings.rate=+e.target.value;Player.rate=S.settings.rate;save();Player.play('I am a lawyer.');}},
   [[0.85,'أبطأ'],[1,'عادية'],[1.15,'أسرع']].map(([v,t])=>h('option',{value:v,selected:S.settings.rate===v},t)));
- const diag=h('div',{class:'diag'});const diagOut=h('pre',{class:'diagout',dir:'ltr'});
- diag.append(h('button',{type:'button',class:'btn sm ghost',onclick:()=>{diagOut.textContent=['v2.3','UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}},'أظهر التفاصيل'),diagOut);
+ const diag=diagBox();
  const micT=h('div');micT.append(speakBox({expected:'I work with clients every day.',onResult:()=>{}}));
  const backup=()=>JSON.stringify(S);
  const ta=h('textarea',{dir:'ltr',rows:'3',placeholder:'الصق هنا نسخة احتياطية لاستعادتها'});
