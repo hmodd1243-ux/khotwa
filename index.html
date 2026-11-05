@@ -169,7 +169,7 @@ textarea{margin:10px 0;font-family:var(--en);font-size:.8rem}
 .meta{display:flex;gap:8px}.meta span{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:4px 12px;font-size:.85rem}
 .sayit{display:grid;gap:6px}.sayit .label{font-weight:700;font-size:.9rem;color:var(--muted)}
 /* speak widget */
-.speak{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;display:grid;gap:10px}
+.speak{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;display:grid;gap:10px;grid-template-columns:minmax(0,1fr)}.speak>*{min-width:0}
 .target{font-family:var(--en);font-size:1.25rem;font-weight:600;text-align:center;line-height:1.6}
 .tw{transition:color .15s,background .15s;border-radius:6px;padding:0 2px}.tw.hit{color:var(--hit);background:var(--goodbg)}
 .microw{display:flex;align-items:center;gap:14px;justify-content:center}
@@ -182,7 +182,8 @@ textarea{margin:10px 0;font-family:var(--en);font-size:.8rem}
 .sstatus{font-size:.92rem;color:var(--muted);flex:1;max-width:240px}
 .speak[data-state=ok] .sstatus{color:var(--good);font-weight:700}.speak[data-state=bad] .sstatus{color:var(--bad)}
 .heard{min-height:1.6em;font-family:var(--en);text-align:center;color:var(--muted)}.heard.big{font-size:1.2rem;color:var(--ink);padding:8px}
-.typewrap{display:flex;gap:8px}.typewrap input{flex:1;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-family:var(--en)}
+.michelp{background:var(--bg);border:1px dashed var(--line);border-radius:14px;padding:10px 12px;font-size:.9rem;display:grid;gap:6px}.michelp ul{margin:0;padding-inline-start:18px;color:var(--muted)}.recbox{display:grid;gap:8px;justify-items:center;border-top:1px solid var(--line);padding-top:8px}
+.typewrap{display:flex;gap:8px}.typewrap input{flex:1;min-width:0;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-family:var(--en)}
 .hint{text-align:center;display:grid;gap:4px;justify-items:center}
 .donebox{text-align:center;display:grid;gap:12px;padding-top:30px}
 .toast{position:fixed;bottom:96px;left:50%;transform:translateX(-50%);background:#1d2a24;color:#fff;padding:10px 18px;border-radius:12px;z-index:100;font-size:.92rem;max-width:90%;text-align:center;transition:opacity .4s}
@@ -349,19 +350,30 @@ const Player={
 
 // ---------- Speech recognition ----------
 const SR=global.SpeechRecognition||global.webkitSpeechRecognition;
-const isAndroid=/Android/i.test(global.navigator?.userAgent||'');
+const UA=global.navigator?.userAgent||'';
+const isAndroid=/Android/i.test(UA);
+// iPadOS reports itself as a Mac; touch points give it away.
+const isIOS=/iPad|iPhone|iPod/.test(UA)||(/Macintosh/.test(UA)&&(global.navigator?.maxTouchPoints||0)>1);
+const isStandalone=()=>{try{return !!(global.navigator?.standalone||global.matchMedia?.('(display-mode: standalone)').matches);}catch{return false;}};
+const FATAL=new Set(['not-allowed','service-not-allowed','audio-capture','network','language-not-supported','bad-grammar']);
 const Ear={
- supported:!!SR,active:null,
+ supported:!!SR,isIOS,isAndroid,isStandalone,active:null,
  // mode: 'word' | 'sentence' | 'free'. Calls onUpdate({phase,text,matched}) and onDone(result) once.
+ // One listening session can span several recogniser instances: Safari on iPhone and Chrome on Android
+ // stop after each short pause (or hear nothing if the speaker was still busy), so the session quietly
+ // restarts the recogniser and keeps what was already heard until the speaker finishes or time runs out.
  start({expected='',mode='sentence',onUpdate=()=>{},onDone=()=>{}}){
   this.cancel();Player.stop();
+  try{const s=global.speechSynthesis;if(s&&(s.speaking||s.pending))s.cancel();}catch{}
   if(!SR){onDone({ok:false,error:'unsupported',text:''});return;}
-  let r;try{r=new SR();}catch{onDone({ok:false,error:'unsupported',text:''});return;}
-  r.lang='en-US';r.interimResults=true;r.maxAlternatives=mode==='word'?5:3;
-  r.continuous=mode==='free'||(mode==='sentence'&&!isAndroid);
-  const T={};let done=false,started=false,finals=[],interim='',alts=[],lastFinal=false;
+  const t0=Date.now();
+  const LIMIT=mode==='word'?(isIOS?12000:9000):mode==='free'?30000:(isIOS?24000:18000);
+  const NOS=mode==='word'?(isIOS?9000:7000):(isIOS?11000:9000);
+  const T={};let done=false,started=false,r=null,restarts=0;
+  let kept=[],finals=[],interim='',alts=[],lastFinal=false,heardAny=false,lastErr='';
   const clear=()=>{for(const k in T)clearTimeout(T[k]);};
-  const candidates=()=>{const base=finals.join(' ').trim();const main=(base+' '+interim).trim();return [main,...alts.map(a=>(base+' '+a).trim())].filter(Boolean);};
+  const detach=x=>{if(x){x.onresult=x.onerror=x.onend=x.onstart=x.onspeechend=x.onaudiostart=x.onsoundstart=null;}};
+  const candidates=()=>{const base=[...kept,...finals].filter(Boolean).join(' ').trim();const main=(base+' '+interim).trim();return [main,...alts.map(a=>(base+' '+a).trim())].filter(Boolean);};
   const evaluate=()=>{
    const cands=candidates();if(!cands.length)return {ok:false,text:'',matched:new Set(),score:0,missing:words(expected)};
    if(mode==='free')return {ok:true,text:cands[0],matched:new Set(),score:1,missing:[]};
@@ -374,44 +386,74 @@ const Ear={
   };
   const finish=reason=>{
    if(done)return;done=true;clear();this.active=null;
-   r.onresult=r.onerror=r.onend=r.onstart=r.onspeechend=null;
-   try{r.abort();}catch{}
+   const x=r;r=null;detach(x);try{x&&x.abort();}catch{}
    const ev=evaluate();
-   onDone({...ev,reason,error:ev.text?'':(reason.startsWith('error:')?reason.slice(6):'nospeech')});
+   const err=ev.text?'':(reason.startsWith('error:')?reason.slice(6):(lastErr&&FATAL.has(lastErr)?lastErr:'nospeech'));
+   onDone({...ev,reason,error:err,heardSound:heardAny});
   };
-  r.onstart=()=>{started=true;clearTimeout(T.boot);onUpdate({phase:'listening',text:'',matched:new Set()});
-   T.nos=setTimeout(()=>finish('nospeech'),mode==='word'?5000:7000);
-   T.max=setTimeout(()=>finish('max'),mode==='word'?7000:mode==='free'?30000:16000);};
-  r.onresult=e=>{
-   clearTimeout(T.nos);finals=[];interim='';alts=[];lastFinal=false;
-   const n=e.results.length;
-   // Everything before the last result is a fixed prefix; the last one carries the alternatives.
-   for(let i=0;i<n-1;i++)finals.push((e.results[i][0]?.transcript||'').trim());
-   const last=e.results[n-1];
-   if(last){lastFinal=!!last.isFinal;interim=(last[0]?.transcript||'').trim();
-    for(let j=1;j<last.length;j++){const alt=(last[j]?.transcript||'').trim();if(alt)alts.push(alt);}}
-   const ev=evaluate();onUpdate({phase:'listening',text:ev.text,matched:ev.matched});
-   // Instant finish: the whole target has been heard.
-   if(mode!=='free'&&ev.ok&&ev.score>=0.999){T.fin=setTimeout(()=>finish('match'),120);return;}
-   if(mode==='word'&&ev.ok){T.fin=setTimeout(()=>finish('match'),120);return;}
-   if(mode==='word'&&lastFinal){finish('final');return;}
-   // Good enough and the last word has been said: close quickly instead of waiting for a long pause.
-   const reachedEnd=mode==='sentence'&&ev.ok&&ev.matched&&ev.matched.has(words(expected).length-1);
-   clearTimeout(T.sil);T.sil=setTimeout(()=>finish('silence'),mode==='word'?650:mode==='free'?1800:reachedEnd?450:1200);
+  const armSilence=ms=>{clearTimeout(T.sil);T.sil=setTimeout(()=>finish('silence'),ms);};
+  const spawn=()=>{
+   let x;try{x=new SR();}catch{finish(started?'end':'error:unsupported');return;}
+   r=x;
+   x.lang='en-US';x.interimResults=true;x.maxAlternatives=mode==='word'?5:3;
+   // Continuous mode is unreliable on phones; restarting short sessions works everywhere.
+   x.continuous=!isIOS&&!isAndroid&&mode!=='word';
+   x.onstart=()=>{
+    if(started)return;started=true;clearTimeout(T.boot);
+    onUpdate({phase:'listening',text:'',matched:new Set()});
+    T.nos=setTimeout(()=>{if(!candidates().length)finish('nospeech');},NOS);
+    T.max=setTimeout(()=>finish('max'),LIMIT);
+   };
+   x.onaudiostart=x.onsoundstart=()=>{heardAny=true;};
+   x.onresult=e=>{
+    if(x!==r)return;
+    heardAny=true;clearTimeout(T.nos);finals=[];interim='';alts=[];lastFinal=false;
+    const n=e.results.length;
+    // Everything before the last result is a fixed prefix; the last one carries the alternatives.
+    for(let i=0;i<n-1;i++)finals.push((e.results[i][0]?.transcript||'').trim());
+    const last=e.results[n-1];
+    if(last){lastFinal=!!last.isFinal;interim=(last[0]?.transcript||'').trim();
+     for(let j=1;j<last.length;j++){const alt=(last[j]?.transcript||'').trim();if(alt)alts.push(alt);}}
+    const ev=evaluate();onUpdate({phase:'hearing',text:ev.text,matched:ev.matched});
+    // Instant finish: the whole target has been heard.
+    if(mode!=='free'&&ev.ok&&ev.score>=0.999){clearTimeout(T.fin);T.fin=setTimeout(()=>finish('match'),120);return;}
+    if(mode==='word'&&ev.ok){clearTimeout(T.fin);T.fin=setTimeout(()=>finish('match'),120);return;}
+    if(mode==='word'&&lastFinal&&ev.text){finish('final');return;}
+    // Good enough and the last word has been said: close quickly instead of waiting for a long pause.
+    const reachedEnd=mode==='sentence'&&ev.ok&&ev.matched&&ev.matched.has(words(expected).length-1);
+    armSilence(mode==='word'?900:mode==='free'?2000:reachedEnd?500:1800);
+   };
+   x.onspeechend=()=>{if(x!==r)return;if(candidates().length)armSilence(mode==='free'?900:mode==='sentence'?1200:500);};
+   x.onerror=e=>{if(x!==r)return;lastErr=e.error||'';if(FATAL.has(lastErr))finish('error:'+lastErr);};
+   x.onend=()=>{
+    if(x!==r||done)return;
+    const ev=evaluate();
+    if(mode!=='free'&&ev.ok){finish('end');return;}
+    if(mode==='word'&&ev.text){finish('end');return;}
+    // Keep what this instance heard and listen again.
+    if(Date.now()-t0<LIMIT-600&&restarts<12){
+     restarts++;
+     const prev=[...finals,interim].filter(Boolean);kept.push(...prev);finals=[];interim='';alts=[];
+     detach(x);r=null;
+     setTimeout(()=>{if(!done)spawn();},isIOS?120:40);
+     return;
+    }
+    finish('end');
+   };
+   try{x.start();}catch{if(!started)finish('error:start');else finish('end');}
   };
-  r.onspeechend=()=>{clearTimeout(T.sil);T.sil=setTimeout(()=>finish('speechend'),mode==='free'?600:300);};
-  r.onerror=e=>{if(e.error==='aborted')return;if(e.error==='no-speech'){finish('nospeech');return;}finish('error:'+e.error);};
-  r.onend=()=>{if(!done)finish('end');};
-  T.boot=setTimeout(()=>{if(!started)finish('error:start-timeout');},6000);
-  this.active={r,finish};onUpdate({phase:'starting',text:'',matched:new Set()});
-  try{r.start();}catch{finish('error:start');}
+  T.boot=setTimeout(()=>{if(!started)finish('error:start-timeout');},7000);
+  this.active={finish,cancel:()=>{done=true;clear();const x=r;r=null;detach(x);try{x&&x.abort();}catch{}}};
+  onUpdate({phase:'starting',text:'',matched:new Set()});
+  spawn();
  },
  stop(){this.active&&this.active.finish('manual');},
- cancel(){const a=this.active;this.active=null;if(a){a.r.onresult=a.r.onerror=a.r.onend=a.r.onstart=a.r.onspeechend=null;try{a.r.abort();}catch{}}},
+ cancel(){const a=this.active;this.active=null;if(a)a.cancel();},
  errorText(code){
+  if(code==='nospeech'&&isIOS)return 'لم يصلني صوتك، اضغط الميكروفون وانتظر حتى يصير أحمر ثم تكلم بصوت واضح وقريب من الجوال';
   return ({
-   'not-allowed':'الميكروفون غير مسموح، اسمح للصفحة باستخدامه من إعدادات المتصفح ثم أعد المحاولة',
-   'service-not-allowed':'خدمة التعرف على الكلام غير متاحة هنا، في الآيفون فعّل Siri والإملاء من الإعدادات، أو افتح الصفحة في Safari أو Chrome',
+   'not-allowed':isIOS?'الميكروفون غير مسموح: الإعدادات ← Safari ← الميكروفون ← سماح، ثم أعد تحميل الصفحة':'الميكروفون غير مسموح، اسمح للصفحة باستخدامه من إعدادات المتصفح ثم أعد المحاولة',
+   'service-not-allowed':isIOS?'التعرف على الكلام مقفل: الإعدادات ← عام ← لوحة المفاتيح ← فعّل «الإملاء»، ثم أعد المحاولة':'خدمة التعرف على الكلام غير متاحة هنا، افتح الصفحة في Chrome',
    'audio-capture':'تعذر فتح الميكروفون، أغلق أي تطبيق يستخدمه ثم أعد المحاولة',
    'network':'خدمة التعرف على الكلام تحتاج اتصالًا بالإنترنت، تحقق من الاتصال',
    'nospeech':'لم أسمع صوتًا، اضغط الميكروفون وتكلم مباشرة',
@@ -585,31 +627,79 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
  spans.forEach((s,i)=>{target.append(s);if(i<spans.length-1)target.append(' ');});
  const heard=h('div',{class:'heard',dir:'ltr',lang:'en'});
  const status=h('div',{class:'sstatus'});
- const btn=h('button',{type:'button',class:'mic'},icon('mic',30));
+ const btn=h('button',{type:'button',class:'mic','aria-label':'الميكروفون'},icon('mic',30));
  const typeWrap=h('div',{class:'typewrap hidden'});
- let tries=0,busy=false;
+ const help=h('div',{class:'michelp hidden'});
+ let tries=0,busy=false,deaf=0,rec=null;
  // Map expected words (normalised) back to the visible tokens.
  const normIdx=[];tokens.forEach((t,i)=>{for(const w of normWords(t))normIdx.push(i);});
  function paint(matched){spans.forEach(s=>s.classList.remove('hit'));for(const k of matched||[]){const i=normIdx[k];if(i!=null)spans[i].classList.add('hit');}}
  function setState(st,msg=''){box.dataset.state=st;status.textContent=msg;btn.replaceChildren(icon(st==='listening'||st==='starting'?'stop':'mic',30));}
+ function showHelp(){
+  if(!help.classList.contains('hidden'))return;
+  const tips=Ear.isIOS?[
+   'انتظر حتى يصير زر الميكروفون أحمر، ثم تكلم بصوت واضح وقريب من الجوال',
+   'فعّل الإملاء: الإعدادات ← عام ← لوحة المفاتيح ← «تفعيل الإملاء»',
+   'اسمح للميكروفون: الإعدادات ← Safari ← الميكروفون ← سماح',
+   Ear.isStandalone()?'أنت تفتح التطبيق من أيقونة الشاشة الرئيسية، والتعرف على الكلام فيها أضعف، جرّب فتح الرابط في Safari مباشرة':'افصل سماعات البلوتوث إن كانت متصلة',
+  ]:['تكلم بصوت واضح وقريب من الجهاز','تأكد من السماح للميكروفون في إعدادات المتصفح','التعرف على الكلام يحتاج اتصالًا بالإنترنت'];
+  help.replaceChildren(...[h('b',null,'لا يلتقط صوتك؟'),h('ul',null,tips.map(t=>h('li',null,t))),canRecord()?recorder():null].filter(Boolean));
+  help.classList.remove('hidden');
+ }
+ // Fallback that always works: record yourself, compare with the model voice, judge it yourself.
+ function canRecord(){return !!(window.MediaRecorder&&navigator.mediaDevices&&navigator.mediaDevices.getUserMedia);}
+ function recorder(){
+  const wrap=h('div',{class:'recbox'});
+  const rb=h('button',{type:'button',class:'btn sm'},'سجّل صوتك وقارن');
+  const out=h('div',{class:'row c'});
+  rb.addEventListener('click',async()=>{
+   if(rec){rec.stop();return;}
+   Ear.cancel();Player.stop();busy=false;setState('idle','');
+   let stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}catch{toast('تعذر فتح الميكروفون');return;}
+   const type=['audio/mp4','audio/webm','audio/ogg'].find(t=>MediaRecorder.isTypeSupported?.(t));
+   let mr;try{mr=new MediaRecorder(stream,type?{mimeType:type}:undefined);}catch{stream.getTracks().forEach(t=>t.stop());toast('التسجيل غير مدعوم هنا');return;}
+   const chunks=[];rec=mr;rb.textContent='إيقاف التسجيل';rb.classList.add('no');out.replaceChildren(h('span',{class:'muted small'},'تكلّم الآن…'));
+   const auto=setTimeout(()=>{if(mr.state==='recording')mr.stop();},mode==='word'?4000:9000);
+   mr.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data);};
+   mr.onstop=()=>{
+    clearTimeout(auto);rec=null;stream.getTracks().forEach(t=>t.stop());rb.textContent='سجّل مرة أخرى';rb.classList.remove('no');
+    const url=URL.createObjectURL(new Blob(chunks,{type:mr.mimeType||type||'audio/mp4'}));const me=new Audio(url);
+    const mine=h('button',{type:'button',class:'btn sm ghost'},icon('play',16),'صوتك');mine.addEventListener('click',()=>{Player.stop();try{me.currentTime=0;}catch{}me.play().catch(()=>{});});
+    const good=h('button',{type:'button',class:'btn sm ok'},icon('check',16),'نطقي مطابق');
+    good.addEventListener('click',()=>{tries++;heard.textContent='';paint(tokens.map((_,i)=>i));setState('ok','أحسنت');help.classList.add('hidden');onResult&&onResult({ok:true,tries,text:expected,self:true});});
+    out.replaceChildren(mine,playBtn(expected,{label:'الصحيح'}),good);
+    me.play().catch(()=>{});
+   };
+   mr.start();
+  });
+  wrap.append(h('div',{class:'muted small'},'سجّل نطقك، اسمعه مع النطق الصحيح، وقرر بنفسك'),rb,out);
+  return wrap;
+ }
  function finish(res){
   busy=false;tries++;
-  if(res.error&&!res.text){setState('idle',Ear.errorText(res.error));if(res.error==='unsupported'||res.error==='not-allowed'||res.error==='service-not-allowed')typeWrap.classList.remove('hidden');return;}
-  heard.textContent=res.text;paint(res.matched);
-  if(res.ok){setState('ok',mode==='word'?'نطق صحيح':'ممتاز، نطقت الجملة');onResult&&onResult({ok:true,tries,text:res.text});}
+  if(res.error&&!res.text){
+   deaf++;setState('idle',Ear.errorText(res.error));
+   if(res.error==='unsupported'||res.error==='not-allowed'||res.error==='service-not-allowed'){typeWrap.classList.remove('hidden');showHelp();}
+   else if(deaf>=2)showHelp();
+   return;
+  }
+  deaf=0;heard.textContent=res.text;paint(res.matched);
+  if(res.ok){setState('ok',mode==='word'?'نطق صحيح':'ممتاز، نطقت الجملة');help.classList.add('hidden');onResult&&onResult({ok:true,tries,text:res.text});}
   else{
    const miss=res.missing?.length?'لم تُلتقط: '+res.missing.slice(0,6).join('، '):'';
-   setState('bad',(mode==='word'?'لم ألتقط الكلمة بوضوح':'قريب، أعد المحاولة')+(miss?' · '+miss:''));
+   setState('bad',(mode==='word'?'سمعت كلمة أخرى، أعد المحاولة':'قريب، أعد المحاولة')+(miss?' · '+miss:''));
+   if(tries>=3)showHelp();
    onResult&&onResult({ok:false,tries,text:res.text});
   }
  }
  btn.addEventListener('click',()=>{
   if(busy){Ear.stop();return;}
-  if(!Ear.supported){setState('idle',Ear.errorText('unsupported'));typeWrap.classList.remove('hidden');return;}
+  if(rec)rec.stop();
+  if(!Ear.supported){setState('idle',Ear.errorText('unsupported'));typeWrap.classList.remove('hidden');if(canRecord())showHelp();return;}
   busy=true;heard.textContent='';paint([]);
   Ear.start({expected,mode,onUpdate:u=>{
    if(u.phase==='starting')setState('starting','لحظة…');
-   else{setState('listening','تكلّم الآن');if(u.text){heard.textContent=u.text;paint(u.matched);}}
+   else{setState('listening',u.text?'أسمعك… أكمل':'تكلّم الآن');if(u.text){heard.textContent=u.text;paint(u.matched);}}
   },onDone:finish});
  });
  if(allowType){
@@ -620,9 +710,9 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
   typeWrap.append(inp,ok);
  }
  const typeLink=allowType?h('button',{type:'button',class:'link small',onclick:()=>typeWrap.classList.toggle('hidden')},'لا أستطيع التحدث الآن، سأكتب'):null;
- box.append(...[showTarget?target:null,h('div',{class:'microw'},btn,status),heard,typeWrap,typeLink].filter(Boolean));
+ box.append(...[showTarget?target:null,h('div',{class:'microw'},btn,status),heard,help,typeWrap,typeLink].filter(Boolean));
  setState('idle','اضغط وتكلّم');
- box.cancel=()=>{if(busy)Ear.cancel();busy=false;};
+ box.cancel=()=>{if(busy)Ear.cancel();busy=false;if(rec)try{rec.stop();}catch{}};
  return box;
 }
 
