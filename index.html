@@ -183,6 +183,10 @@ textarea{margin:10px 0;font-family:var(--en);font-size:.8rem}
 .speak[data-state=ok] .sstatus{color:var(--good);font-weight:700}.speak[data-state=bad] .sstatus{color:var(--bad)}
 .heard{min-height:1.6em;font-family:var(--en);text-align:center;color:var(--muted)}.heard.big{font-size:1.2rem;color:var(--ink);padding:8px}
 .diag{display:grid;gap:8px}.diagout{white-space:pre-wrap;word-break:break-all;font-size:.75rem;background:var(--bg);border-radius:10px;padding:8px;margin:0}.diagout:empty{display:none}
+.tw.miss{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
+.fixrow{display:grid;gap:8px;justify-items:center}.fixitem{display:inline-flex;gap:4px;align-items:center}
+.fixw{display:inline-flex;gap:6px;align-items:center;border:1.5px solid var(--bad);background:var(--badbg);color:var(--ink);border-radius:999px;padding:6px 12px;font-weight:700;min-height:40px}
+.fixw.live{background:var(--bad);color:#fff;animation:ring 1.2s infinite}.fixw.wrong{border-style:dashed}
 .michelp{background:var(--bg);border:1px dashed var(--line);border-radius:14px;padding:10px 12px;font-size:.9rem;display:grid;gap:6px}.michelp ul{margin:0;padding-inline-start:18px;color:var(--muted)}.recbox{display:grid;gap:8px;justify-items:center;border-top:1px solid var(--line);padding-top:8px}
 .typewrap{display:flex;gap:8px}.typewrap input{flex:1;min-width:0;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-family:var(--en)}
 .hint{text-align:center;display:grid;gap:4px;justify-items:center}
@@ -781,9 +785,9 @@ document.addEventListener('click',e=>{if(glossPop&&!glossPop.contains(e.target))
 
 // ---------- Speaking widget ----------
 // Live-highlights each expected word as it is heard; finishes the moment the full target is heard.
-function diagText(){return ['v2.6','engine: '+Ear.engine()+' (pref '+Ear.prefer+')','model: '+(HE.Local.ready()?'ready':HE.Local.loading?'loading '+Math.round(HE.Local.progress*100)+'%':'not loaded')+(HE.Local.error?' err '+HE.Local.error:''),'UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}
+function diagText(){return ['v2.7','engine: '+Ear.engine()+' (pref '+Ear.prefer+')','model: '+(HE.Local.ready()?'ready':HE.Local.loading?'loading '+Math.round(HE.Local.progress*100)+'%':'not loaded')+(HE.Local.error?' err '+HE.Local.error:''),'UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}
 function diagBox(){const out=h('pre',{class:'diagout',dir:'ltr'});return h('div',{class:'diag'},h('button',{type:'button',class:'btn sm ghost',onclick:()=>{out.textContent=diagText();}},'أظهر التفاصيل للمطوّر'),out);}
-function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=true}){
+function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=true,mustInclude=''}){
  const box=h('div',{class:'speak'});
  if(Ear.useLocal())HE.Local.load().catch(()=>{});
  const target=h('div',{class:'target',dir:'ltr',lang:'en'});
@@ -795,10 +799,12 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
  const btn=h('button',{type:'button',class:'mic','aria-label':'الميكروفون'},icon('mic',30));
  const typeWrap=h('div',{class:'typewrap hidden'});
  const help=h('div',{class:'michelp hidden'});
+ const fix=h('div',{class:'fixrow hidden'});
  let tries=0,busy=false,deaf=0,rec=null;
  // Map expected words (normalised) back to the visible tokens.
  const normIdx=[];tokens.forEach((t,i)=>{for(const w of normWords(t))normIdx.push(i);});
- function paint(matched){spans.forEach(s=>s.classList.remove('hit'));for(const k of matched||[]){const i=normIdx[k];if(i!=null)spans[i].classList.add('hit');}}
+ function paint(matched){spans.forEach(s=>s.classList.remove('hit','miss'));for(const k of matched||[]){const i=normIdx[k];if(i!=null)spans[i].classList.add('hit');}
+  if(tries&&mode==='sentence')spans.forEach(s=>{if(!s.classList.contains('hit'))s.classList.add('miss');});}
  function setState(st,msg=''){box.dataset.state=st;status.textContent=msg;btn.replaceChildren(icon(st==='listening'||st==='starting'?'stop':'mic',30));}
  function showHelp(){
   if(!help.classList.contains('hidden'))return;
@@ -846,6 +852,38 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
   wrap.append(h('div',{class:'muted small'},'سجّل نطقك، اسمعه مع النطق الصحيح، وقرر بنفسك'),rb,out);
   return wrap;
  }
+ // Word-by-word repair: after a sentence attempt, each word that was not caught gets its own button,
+ // so only that word is said again instead of the whole sentence.
+ const wantWords=normWords(expected);
+ const mustIdx=mustInclude?normWords(mustInclude).map(w=>wantWords.indexOf(w)).filter(i=>i>=0):[];
+ let got=new Set(),fixing=null;
+ function passed(text){fix.classList.add('hidden');heard.textContent=text;setState('ok',mode==='word'?'نطق صحيح':'ممتاز، نطقت الجملة');help.classList.add('hidden');onResult&&onResult({ok:true,tries,text});}
+ function showFix(){
+  const miss=wantWords.map((_,k)=>k).filter(k=>!got.has(k));
+  if(!miss.length){paint(got);passed(expected);return;}
+  // Merge words that map to the same visible token (e.g. "don't" -> do not).
+  const byTok=new Map();for(const k of miss){const t=normIdx[k];if(!byTok.has(t))byTok.set(t,[]);byTok.get(t).push(k);}
+  const btns=[...byTok.entries()].map(([t,ks])=>{
+   const word=tokens[t].replace(/^[^A-Za-z0-9']+|[^A-Za-z0-9']+$/g,'')||tokens[t];
+   const b=h('button',{type:'button',class:'fixw'},icon('mic',16),en(word));
+   b.addEventListener('click',()=>{
+    if(fixing){Ear.stop();return;}
+    if(busy){Ear.cancel();busy=false;}
+    fixing=b;b.classList.add('live');setState('listening','قل الكلمة: '+word);
+    Ear.start({expected:word,mode:'word',onUpdate:u=>{
+     if(u.phase==='thinking'||u.phase==='loading')setState('starting','لحظة، أحلل نطقك…');
+     else if(u.phase==='speech')setState('listening','أسمعك…');
+    },onDone:r=>{
+     fixing=null;b.classList.remove('live');
+     if(r.ok){for(const k of ks)got.add(k);paint(got);showFix();if(got.size<wantWords.length)setState('bad','أحسنت، بقي: '+[...fix.querySelectorAll('.fixw')].map(x=>x.textContent).join('، '));}
+     else{b.classList.add('wrong');setState('bad',r.error&&!r.text?Ear.errorText(r.error):'سمعت «'+(r.text||'…')+'»، اسمع الكلمة وأعدها');}
+    }});
+   });
+   return h('span',{class:'fixitem'},b,playBtn(word));
+  });
+  fix.replaceChildren(h('div',{class:'small muted'},'اضغط الكلمة وقلها وحدها:'),h('div',{class:'row c'},btns));
+  fix.classList.remove('hidden');
+ }
  function finish(res){
   busy=false;tries++;
   if(res.error&&!res.text){
@@ -854,20 +892,31 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
    else if(deaf>=(Ear.isIOS?1:2))showHelp();
    return;
   }
-  deaf=0;heard.textContent=res.text;paint(res.matched);
-  if(res.ok){setState('ok',mode==='word'?'نطق صحيح':'ممتاز، نطقت الجملة');help.classList.add('hidden');onResult&&onResult({ok:true,tries,text:res.text});}
-  else{
-   const miss=res.missing?.length?'لم تُلتقط: '+res.missing.slice(0,6).join('، '):'';
-   setState('bad',(mode==='word'?'سمعت كلمة أخرى، أعد المحاولة':'قريب، أعد المحاولة')+(miss?' · '+miss:''));
+  deaf=0;heard.textContent=res.text;
+  // Words caught in this attempt add to those already fixed.
+  if(mode==='sentence'){for(const k of res.matched||[])got.add(k);}
+  const keyMissing=mustIdx.filter(k=>!got.has(k));
+  if(res.ok&&!keyMissing.length){paint(mode==='sentence'?got:res.matched);passed(res.text);return;}
+  if(mode==='sentence'&&wantWords.length>1){
+   paint(got);showFix();
+   const left=wantWords.length-got.size;
+   setState('bad',left?'قريب! أعد الكلمات المظللة فقط، أو قل الجملة كاملة مرة ثانية':'');
    if(tries>=3)showHelp();
    onResult&&onResult({ok:false,tries,text:res.text});
+   return;
   }
+  paint(res.matched);
+  setState('bad',mode==='word'?'سمعت كلمة أخرى، أعد المحاولة':'قريب، أعد المحاولة');
+  if(tries>=3)showHelp();
+  onResult&&onResult({ok:false,tries,text:res.text});
  }
+
  btn.addEventListener('click',()=>{
   if(busy){Ear.stop();return;}
   if(rec)rec.stop();
   if(!Ear.supported){setState('idle',Ear.errorText('unsupported'));typeWrap.classList.remove('hidden');if(canRecord())showHelp();return;}
-  busy=true;heard.textContent='';paint([]);
+  if(fixing){Ear.cancel();fixing.classList.remove('live');fixing=null;}
+  busy=true;heard.textContent='';paint(mode==='sentence'?got:[]);
   Ear.start({expected,mode,onUpdate:u=>{
    if(u.phase==='starting')setState('starting','لحظة…');
    else if(u.phase==='loading')setState('starting','أحمّل نموذج الصوت لأول مرة فقط… '+Math.round((u.progress||0)*100)+'%');
@@ -884,9 +933,9 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
   typeWrap.append(inp,ok);
  }
  const typeLink=allowType?h('button',{type:'button',class:'link small',onclick:()=>typeWrap.classList.toggle('hidden')},'لا أستطيع التحدث الآن، سأكتب'):null;
- box.append(...[showTarget?target:null,h('div',{class:'microw'},btn,status),heard,help,typeWrap,typeLink].filter(Boolean));
+ box.append(...[showTarget?target:null,h('div',{class:'microw'},btn,status),heard,fix,help,typeWrap,typeLink].filter(Boolean));
  setState('idle','اضغط وتكلّم');
- box.cancel=()=>{if(busy)Ear.cancel();busy=false;if(rec)try{rec.stop();}catch{}};
+ box.cancel=()=>{if(busy||fixing)Ear.cancel();busy=false;fixing=null;if(rec)try{rec.stop();}catch{}};
  return box;
 }
 
@@ -1115,11 +1164,12 @@ function openLesson(id){
   const c=cards[i];body.replaceChildren();
   if(c.k){
    const d=wordData(c.k);
-   const sb=speakBox({expected:d.w,mode:'word',showTarget:false,onResult:r=>{if(r.ok){addXP(1);setTimeout(()=>show(i+1),700);}}});cur=sb;
+   const sb=d.ex?speakBox({expected:d.ex.en,mode:'sentence',mustInclude:d.w,onResult:r=>{if(r.ok){addXP(1);setTimeout(()=>show(i+1),900);}}})
+    :speakBox({expected:d.w,mode:'word',showTarget:false,onResult:r=>{if(r.ok){addXP(1);setTimeout(()=>show(i+1),700);}}});cur=sb;
    body.append(h('div',{class:'kicker'},'كلمة جديدة '+(l.words.indexOf(c.k)+1)+' من '+l.words.length),
     h('div',{class:'wordcard big'},en(d.w,'bigw'),h('div',{class:'pron'},d.p),h('div',{class:'mean'},d.m),h('div',{class:'row c'},playBtn(d.w,{big:true}),playBtn(d.w,{slow:true}))),
     d.ex?h('div',{class:'excard'},h('div',{class:'row sp'},glossLine(d.ex.en),playBtn(d.ex.en)),h('div',{class:'muted'},d.ex.ar)):null,
-    h('div',{class:'sayit'},h('div',{class:'label'},'قلها بصوتك'),sb));
+    h('div',{class:'sayit'},h('div',{class:'label'},d.ex?'قل الجملة كاملة':'قلها بصوتك'),sb));
    sayAuto(d.w,80);
   }else{
    const s=c.s;
