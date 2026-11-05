@@ -356,16 +356,170 @@ const isAndroid=/Android/i.test(UA);
 // iPadOS reports itself as a Mac; touch points give it away.
 const isIOS=/iPad|iPhone|iPod/.test(UA)||(/Macintosh/.test(UA)&&(global.navigator?.maxTouchPoints||0)>1);
 const isStandalone=()=>{try{return !!(global.navigator?.standalone||global.matchMedia?.('(display-mode: standalone)').matches);}catch{return false;}};
+// ---------- On-device recognition (Whisper, runs in the browser) ----------
+// Used where the browser's own speech service hears nothing (Safari on iPhone). The model downloads once
+// (about 41 MB) and is then cached by the browser.
+const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6/dist/transformers.min.js';
+const MODEL_ID='Xenova/whisper-tiny.en';
+const Local={
+ supported:!!(global.navigator?.mediaDevices?.getUserMedia&&(global.AudioContext||global.webkitAudioContext)),
+ asr:null,loading:null,progress:0,onProgress:null,error:'',
+ ready(){return !!this.asr;},
+ // Whisper's free guess is unreliable for a single isolated word, but it can say how well the audio fits
+ // the word we expect. Returns how much less likely the expected text is than the model's own guess
+ // (0 = just as likely; mismatched words are typically 5-15 lower).
+ async gap(audio,expected,guess){
+  const tf=this.tf,asr=this.asr,tok=asr.tokenizer;
+  if(!this.pref){const id=t=>tok.model.tokens_to_ids.get(t);this.pref=[id('<|startoftranscript|>'),id('<|notimestamps|>')];this.eot=id('<|endoftext|>');}
+  const f=await asr.processor(audio);
+  const r=await asr.model.sessions.model.run({input_features:f.input_features.ort_tensor});
+  const enc=new tf.Tensor(r.last_hidden_state);
+  const score=async text=>{
+   const seq=[...this.pref,...tok.encode(text,{add_special_tokens:false}),this.eot];
+   const inp=new tf.Tensor('int64',BigInt64Array.from(seq.map(BigInt)),[1,seq.length]);
+   const out=await asr.model({encoder_outputs:enc,decoder_input_ids:inp});
+   const V=out.logits.dims[2],d=out.logits.data;let sum=0;
+   for(let i=this.pref.length-1;i<seq.length-1;i++){const row=d.subarray(i*V,(i+1)*V);let m=-Infinity;for(let k=0;k<V;k++)if(row[k]>m)m=row[k];let z=0;for(let k=0;k<V;k++)z+=Math.exp(row[k]-m);sum+=row[seq[i+1]]-m-Math.log(z);}
+   return sum;
+  };
+  const base=String(expected).trim().replace(/[.?!,]+$/,''),low=base.toLowerCase(),cap=low.charAt(0).toUpperCase()+low.slice(1);
+  let best=-Infinity;for(const v of new Set([' '+cap+'.',' '+cap,' '+low+'.',' '+low,' '+cap+'!',' '+cap+'?',' '+base+'.',' '+base]))best=Math.max(best,await score(v));
+  const own=guess?await score(' '+guess.trim()):best;
+  return Math.max(0,own-best);
+ },
+ load(){
+  if(this.asr)return Promise.resolve(this.asr);
+  if(this.loading)return this.loading;
+  const files={};
+  this.loading=(async()=>{
+   const tf=await import(TF_URL);
+   tf.env.allowLocalModels=false;
+   const asr=await tf.pipeline('automatic-speech-recognition',MODEL_ID,{dtype:'q8',device:'wasm',
+    progress_callback:p=>{if(p&&p.status==='progress'&&p.total){files[p.file]=[p.loaded,p.total];let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1];}this.progress=b?a/b:0;try{this.onProgress&&this.onProgress(this.progress);}catch{}}}});
+   this.tf=tf;this.asr=asr;this.progress=1;this.error='';return asr;
+  })().catch(e=>{this.loading=null;this.error=String(e&&e.message||e);throw e;});
+  return this.loading;
+ }
+};
+function resample(data,from,to){
+ if(from===to)return data;
+ const ratio=from/to,n=Math.floor(data.length/ratio),out=new Float32Array(n);
+ for(let i=0;i<n;i++){const x=i*ratio,j=Math.floor(x),f=x-j;out[i]=(data[j]||0)*(1-f)+(data[j+1]||0)*f;}
+ return out;
+}
+function cleanTranscript(t){return String(t||'').replace(/\[[^\]]*\]|\([^)]*\)|\*[^*]*\*/g,' ').replace(/\s+/g,' ').trim();}
+
 const FATAL=new Set(['not-allowed','service-not-allowed','audio-capture','network','language-not-supported','bad-grammar']);
 const Ear={
- supported:!!SR,log:[],isIOS,isAndroid,isStandalone,active:null,
+ supported:!!SR||Local.supported,prefer:'auto',log:[],isIOS,isAndroid,isStandalone,active:null,
  // mode: 'word' | 'sentence' | 'free'. Calls onUpdate({phase,text,matched}) and onDone(result) once.
  // One listening session can span several recogniser instances: Safari on iPhone and Chrome on Android
  // stop after each short pause (or hear nothing if the speaker was still busy), so the session quietly
  // restarts the recogniser and keeps what was already heard until the speaker finishes or time runs out.
- start({expected='',mode='sentence',onUpdate=()=>{},onDone=()=>{}}){
+ useLocal(){const p=this.prefer||'auto';if(!Local.supported)return false;if(p==='web')return !SR?true:false;return p==='local'||isIOS||!SR;},
+ engine(){return this.useLocal()?'local':'web';},
+ startLocal({expected='',mode='sentence',onUpdate=()=>{},onDone=()=>{}}){
+  const t0=Date.now();const log=[];this.log=log;const L=m=>{log.push(((Date.now()-t0)/1000).toFixed(1)+'s '+m);if(log.length>60)log.shift();};
+  const NOS=mode==='word'?7000:9000,LIMIT=mode==='word'?8000:mode==='free'?25000:16000;
+  const END=mode==='word'?800:mode==='free'?1500:1100;
+  const AC=global.AudioContext||global.webkitAudioContext;
+  let done=false,state='listening',stream=null,ctx=null,src=null,an=null,rec=null,recType='',blobs=[],speech=false,speechAt=0,calib=[],floor=0,peak=0,silentMs=0,loud=0,elapsed=0,recStart=0;
+  const T={};
+  L('engine local, model '+(Local.ready()?'ready':'not loaded'));
+  // The audio context must be created inside the tap so iPhone lets it run.
+  try{ctx=new AC();ctx.resume&&ctx.resume().catch(()=>{});}catch(e){onDone({ok:false,text:'',error:'audio-capture',reason:'error:audio-capture'});return;}
+  const modelP=Local.load();modelP.catch(()=>{});
+  const stopMic=()=>{for(const k in T){clearTimeout(T[k]);clearInterval(T[k]);}
+   try{src&&src.disconnect();}catch{}
+   try{stream&&stream.getTracks().forEach(t=>t.stop());}catch{}};
+  const release=()=>{stopMic();try{rec&&rec.state!=='inactive'&&rec.stop();}catch{}try{ctx&&ctx.state!=='closed'&&ctx.close();}catch{}};
+  const fail=code=>{if(done)return;done=true;release();this.active=null;Local.onProgress=null;L('fail '+code);
+   onDone({ok:false,text:'',matched:new Set(),score:0,missing:words(expected),error:code,reason:'error:'+code,heardSound:speech});};
+  const evaluate=text=>{
+   if(mode==='free')return {ok:true,text,matched:new Set(),score:1,missing:[]};
+   const a=align(expected,text);const ok=mode==='word'?wordPass(expected,text):sentencePass(a);
+   return {ok,text,matched:a.matched,score:a.score,missing:a.missing};
+  };
+  // Recording runs off the main thread (MediaRecorder), so a busy page (model loading) cannot drop audio.
+  const recorded=()=>new Promise(res=>{
+   if(!rec||rec.state==='inactive'){res(new Blob(blobs,{type:recType}));return;}
+   rec.onstop=()=>res(new Blob(blobs,{type:rec.mimeType||recType}));
+   try{rec.requestData&&rec.requestData();}catch{}try{rec.stop();}catch{res(new Blob(blobs,{type:recType}));}
+  });
+  const decode=async blob=>{
+   const buf=await blob.arrayBuffer();
+   const ab=await new Promise((ok,no)=>{try{const p=ctx.decodeAudioData(buf,ok,no);if(p&&p.then)p.then(ok,no);}catch(e){no(e);}});
+   const ch=ab.getChannelData(0);
+   // Keep from just before the voice started (with a little lead-in) to the end.
+   const from=speech?Math.max(0,Math.floor((speechAt-recStart-700)/1000*ab.sampleRate)):0;
+   return resample(ch.subarray(from),ab.sampleRate,16000);
+  };
+  const stopCapture=async reason=>{
+   if(done||state!=='listening')return;state='thinking';
+   L('stop '+reason+' speech='+speech+' peak='+peak.toFixed(3));
+   stopMic();
+   if(!speech&&peak<0.008){fail('nospeech');return;}
+   const blob=await recorded();L('recorded '+Math.round(blob.size/1024)+'KB '+(blob.type||recType));
+   let audio;try{audio=await decode(blob);}catch(e){L('decode error '+(e&&e.message||e));fail('audio-capture');return;}
+   try{ctx.close();}catch{}
+   if(done)return;
+   if(!Local.ready()){Local.onProgress=p=>onUpdate({phase:'loading',progress:p,text:'',matched:new Set()});onUpdate({phase:'loading',progress:Local.progress,text:'',matched:new Set()});}
+   else onUpdate({phase:'thinking',text:'',matched:new Set()});
+   let asr;try{asr=await modelP;}catch(e){L('model error '+(e&&e.message||e));fail('model');return;}
+   Local.onProgress=null;if(done)return;
+   onUpdate({phase:'thinking',text:'',matched:new Set()});
+   let text='';const t1=Date.now();
+   try{const out=await asr(audio);text=cleanTranscript(out&&out.text);}catch(e){L('asr error '+(e&&e.message||e));fail('model');return;}
+   if(done)return;L('heard "'+text+'" in '+((Date.now()-t1)/1000).toFixed(1)+'s ('+(audio.length/16000).toFixed(1)+'s audio)');
+   if(!text){done=true;this.active=null;onDone({ok:false,text:'',matched:new Set(),score:0,missing:words(expected),error:'nospeech',reason,heardSound:speech});return;}
+   state='judging';
+   let ev=evaluate(text);
+   const n=words(expected).length;
+   if(!ev.ok&&mode!=='free'&&n&&n<=3){
+    onUpdate({phase:'thinking',text:'',matched:new Set()});
+    try{const g=await Local.gap(audio,expected,text);L('gap '+g.toFixed(2));
+     if(g<=4){const a=align(expected,expected);ev={ok:true,text:expected,matched:a.matched,score:1,missing:[]};}}
+    catch(e){L('gap error '+(e&&e.message||e));}
+    if(done)return;
+   }
+   done=true;this.active=null;
+   onDone({...ev,reason,error:'',heardSound:true});
+  };
+  this.active={finish:r=>{stopCapture(r);},cancel:()=>{done=true;release();Local.onProgress=null;}};
+  onUpdate({phase:'starting',text:'',matched:new Set()});
+  global.navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:true,channelCount:1}}).then(s=>{
+   if(done){s.getTracks().forEach(t=>t.stop());return;}
+   stream=s;
+   if(!global.MediaRecorder){fail('unsupported');return;}
+   recType=['audio/mp4','audio/webm;codecs=opus','audio/webm','audio/ogg'].find(t=>{try{return MediaRecorder.isTypeSupported(t);}catch{return false;}})||'';
+   try{rec=new MediaRecorder(s,recType?{mimeType:recType}:undefined);}catch{rec=new MediaRecorder(s);}
+   rec.ondataavailable=e=>{if(e.data&&e.data.size)blobs.push(e.data);};
+   rec.start(250);recStart=Date.now();
+   src=ctx.createMediaStreamSource(s);an=ctx.createAnalyser();an.fftSize=2048;src.connect(an);
+   const buf=new Float32Array(an.fftSize),STEP=50;
+   T.vad=setInterval(()=>{
+    if(state!=='listening')return;
+    an.getFloatTimeDomainData(buf);elapsed+=STEP;
+    let sum=0;for(let i=0;i<buf.length;i++)sum+=buf[i]*buf[i];const rms=Math.sqrt(sum/buf.length);
+    if(elapsed<=300){calib.push(rms);floor=Math.min(...calib);return;}
+    peak=Math.max(peak,rms);
+    const thr=Math.min(0.04,Math.max(0.01,floor*3));
+    if(rms>thr){loud++;silentMs=0;if(!speech&&loud>=2){speech=true;speechAt=Date.now()-STEP*2;clearTimeout(T.nos);L('speech start');onUpdate({phase:'speech',text:'',matched:new Set()});}}
+    else{loud=0;if(speech){silentMs+=STEP;if(silentMs>=END)stopCapture('silence');}}
+   },STEP);
+   L('mic open '+ctx.sampleRate+'Hz '+(recType||'default'));
+   onUpdate({phase:'listening',text:'',matched:new Set()});
+   T.nos=setTimeout(()=>{if(!speech)stopCapture('nospeech');},NOS);
+   T.max=setTimeout(()=>stopCapture('max'),LIMIT);
+  }).catch(err=>{L('mic error '+(err&&err.name));fail(err&&(err.name==='NotAllowedError'||err.name==='SecurityError')?'not-allowed':'audio-capture');});
+ },
+ start(opts){
   this.cancel();Player.stop();
   try{const s=global.speechSynthesis;if(s&&(s.speaking||s.pending))s.cancel();}catch{}
+  if(this.useLocal())return this.startLocal(opts);
+  return this.startWeb(opts);
+ },
+ startWeb({expected='',mode='sentence',onUpdate=()=>{},onDone=()=>{}}){
   if(!SR){onDone({ok:false,error:'unsupported',text:''});return;}
   const t0=Date.now();const log=[];this.log=log;const L=m=>{log.push(((Date.now()-t0)/1000).toFixed(1)+'s '+m);if(log.length>60)log.shift();};
   const LIMIT=mode==='word'?(isIOS?12000:9000):mode==='free'?30000:(isIOS?24000:18000);
@@ -460,7 +614,8 @@ const Ear={
    'nospeech':'لم أسمع صوتًا، اضغط الميكروفون وتكلم مباشرة',
    'unsupported':'هذا المتصفح لا يدعم التعرف على الكلام، استخدم Chrome أو Safari، أو اكتب الإجابة',
    'start-timeout':'تأخر تشغيل الميكروفون، أعد المحاولة',
-   'start':'تعذر تشغيل الميكروفون، أعد المحاولة بعد لحظة'
+   'start':'تعذر تشغيل الميكروفون، أعد المحاولة بعد لحظة',
+   'model':'تعذر تحميل نموذج الصوت، تحقق من الإنترنت وأعد المحاولة'
   })[code]||'تعذر الاستماع، أعد المحاولة';
  }
 };
@@ -484,7 +639,7 @@ const SRS={
 function shuffle(arr,rand=Math.random){const a=arr.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(rand()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
 function sample(arr,n,rand){return shuffle(arr,rand).slice(0,n);}
 
-global.HE={normText,words,align,sentencePass,wordPass,typedEqual,typedDiff,lev,canon,Player,Ear,SRS,DAY,shuffle,sample};
+global.HE={Local,normText,words,align,sentencePass,wordPass,typedEqual,typedDiff,lev,canon,Player,Ear,SRS,DAY,shuffle,sample};
 })(typeof window!=='undefined'?window:globalThis);
 </script>
 <script>// ===== خطوة · تطبيق حمود لتعلم الإنجليزية =====
@@ -620,8 +775,11 @@ document.addEventListener('click',e=>{if(glossPop&&!glossPop.contains(e.target))
 
 // ---------- Speaking widget ----------
 // Live-highlights each expected word as it is heard; finishes the moment the full target is heard.
+function diagText(){return ['v2.5','engine: '+Ear.engine()+' (pref '+Ear.prefer+')','model: '+(HE.Local.ready()?'ready':HE.Local.loading?'loading '+Math.round(HE.Local.progress*100)+'%':'not loaded')+(HE.Local.error?' err '+HE.Local.error:''),'UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}
+function diagBox(){const out=h('pre',{class:'diagout',dir:'ltr'});return h('div',{class:'diag'},h('button',{type:'button',class:'btn sm ghost',onclick:()=>{out.textContent=diagText();}},'أظهر التفاصيل للمطوّر'),out);}
 function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=true}){
  const box=h('div',{class:'speak'});
+ if(Ear.useLocal())HE.Local.load().catch(()=>{});
  const target=h('div',{class:'target',dir:'ltr',lang:'en'});
  const tokens=expected.split(/\s+/).filter(Boolean);
  const spans=tokens.map(t=>h('span',{class:'tw'},t));
@@ -638,14 +796,19 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
  function setState(st,msg=''){box.dataset.state=st;status.textContent=msg;btn.replaceChildren(icon(st==='listening'||st==='starting'?'stop':'mic',30));}
  function showHelp(){
   if(!help.classList.contains('hidden'))return;
-  const tips=Ear.isIOS?[
+  const tips=Ear.engine()==='local'?[
+   'تكلم بصوت واضح وقريب من الجوال، ثم توقف لحظة ليبدأ التحليل',
+   'أول مرة فقط يحمّل التطبيق نموذج الصوت (41 ميغابايت تقريبًا)، تأكد من اتصالك بالإنترنت',
+   'اسمح للميكروفون: الإعدادات ← Safari ← الميكروفون ← سماح',
+   'إن استمرت المشكلة جرّب في الإعدادات: «التعرف على الصوت» ← «خدمة المتصفح»',
+  ]:Ear.isIOS?[
    'انتظر حتى يصير زر الميكروفون أحمر، ثم تكلم بصوت واضح وقريب من الجوال',
    ...(navigator.brave||/CriOS|FxiOS|EdgiOS/.test(navigator.userAgent)?['أنت تستخدم متصفحًا غير Safari، والتعرف على الكلام في الآيفون يعمل بشكل أفضل في Safari، انسخ الرابط وافتحه في Safari']:[]),
    'فعّل الإملاء: الإعدادات ← عام ← لوحة المفاتيح ← «تفعيل الإملاء»',
    'اسمح للميكروفون: الإعدادات ← Safari ← الميكروفون ← سماح',
    Ear.isStandalone()?'أنت تفتح التطبيق من أيقونة الشاشة الرئيسية، والتعرف على الكلام فيها أضعف، جرّب فتح الرابط في Safari مباشرة':'افصل سماعات البلوتوث إن كانت متصلة',
   ]:['تكلم بصوت واضح وقريب من الجهاز','تأكد من السماح للميكروفون في إعدادات المتصفح','التعرف على الكلام يحتاج اتصالًا بالإنترنت'];
-  help.replaceChildren(...[h('b',null,'لا يلتقط صوتك؟'),h('ul',null,tips.map(t=>h('li',null,t))),canRecord()?recorder():null].filter(Boolean));
+  help.replaceChildren(...[h('b',null,'لا يلتقط صوتك؟'),h('ul',null,tips.map(t=>h('li',null,t))),canRecord()?recorder():null,diagBox()].filter(Boolean));
   help.classList.remove('hidden');
  }
  // Fallback that always works: record yourself, compare with the model voice, judge it yourself.
@@ -682,7 +845,7 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
   if(res.error&&!res.text){
    deaf++;setState('idle',Ear.errorText(res.error));
    if(res.error==='unsupported'||res.error==='not-allowed'||res.error==='service-not-allowed'){typeWrap.classList.remove('hidden');showHelp();}
-   else if(deaf>=2)showHelp();
+   else if(deaf>=(Ear.isIOS?1:2))showHelp();
    return;
   }
   deaf=0;heard.textContent=res.text;paint(res.matched);
@@ -701,6 +864,9 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
   busy=true;heard.textContent='';paint([]);
   Ear.start({expected,mode,onUpdate:u=>{
    if(u.phase==='starting')setState('starting','لحظة…');
+   else if(u.phase==='loading')setState('starting','أحمّل نموذج الصوت لأول مرة فقط… '+Math.round((u.progress||0)*100)+'%');
+   else if(u.phase==='thinking')setState('starting','لحظة، أحلل نطقك…');
+   else if(u.phase==='speech')setState('listening','أسمعك… أكمل، وتوقف عند الانتهاء');
    else{setState('listening',u.text?'أسمعك… أكمل':'تكلّم الآن');if(u.text){heard.textContent=u.text;paint(u.matched);}}
   },onDone:finish});
  });
@@ -1180,8 +1346,9 @@ function viewSettings(m){
   h('input',{type:'checkbox',checked:!!S.settings[key],onchange:e=>{S.settings[key]=e.target.checked;save();}}));
  const rate=h('select',{onchange:e=>{S.settings.rate=+e.target.value;Player.rate=S.settings.rate;save();Player.play('I am a lawyer.');}},
   [[0.85,'أبطأ'],[1,'عادية'],[1.15,'أسرع']].map(([v,t])=>h('option',{value:v,selected:S.settings.rate===v},t)));
- const diag=h('div',{class:'diag'});const diagOut=h('pre',{class:'diagout',dir:'ltr'});
- diag.append(h('button',{type:'button',class:'btn sm ghost',onclick:()=>{diagOut.textContent=['v2.3','UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}},'أظهر التفاصيل'),diagOut);
+ const diag=diagBox();
+ const eng=h('select',{onchange:e=>{S.settings.engine=e.target.value;Ear.prefer=e.target.value;save();if(Ear.useLocal())HE.Local.load().catch(()=>{});}},
+  [['auto','تلقائي'],['local','داخل الجهاز'],['web','خدمة المتصفح']].map(([v,t])=>h('option',{value:v,selected:(S.settings.engine||'auto')===v},t)));
  const micT=h('div');micT.append(speakBox({expected:'I work with clients every day.',onResult:()=>{}}));
  const backup=()=>JSON.stringify(S);
  const ta=h('textarea',{dir:'ltr',rows:'3',placeholder:'الصق هنا نسخة احتياطية لاستعادتها'});
@@ -1189,7 +1356,7 @@ function viewSettings(m){
   h('section',{class:'card'},h('h3',null,'الصوت'),toggle('تشغيل تلقائي','auto','يُشغَّل نطق الكلمة والجملة فور ظهورها'),toggle('ابدأ بالنطق البطيء','slowFirst','مفيد في البداية'),
    h('label',{class:'set'},h('b',null,'سرعة الصوت الآلي'),rate),
    h('p',{class:'muted small'},'كلمات وجمل المستويات من 1 إلى 4 بأصوات مسجلة، وجمل المستويين 5 و6 بصوت الجهاز')),
-  h('section',{class:'card'},h('h3',null,'اختبر الميكروفون'),h('p',{class:'muted small'},'قل الجملة، وستتلون الكلمات أثناء نطقك وينتهي الاستماع فور اكتمالها'),micT,
+  h('section',{class:'card'},h('h3',null,'اختبر الميكروفون'),h('label',{class:'set'},h('div',null,h('b',null,'التعرف على الصوت'),h('span',{class:'muted small'},'«داخل الجهاز» يحمّل نموذجًا مرة واحدة (41 ميغابايت تقريبًا) ويعمل في الآيفون حتى لو لم تسمعك خدمة Safari')),eng),h('p',{class:'muted small'},'قل الجملة، وستتلون الكلمات أثناء نطقك وينتهي الاستماع فور اكتمالها'),micT,
    h('p',{class:'muted small'},Ear.supported?'التعرف على الكلام مدعوم في هذا المتصفح، ويحتاج اتصالًا بالإنترنت في أغلب الأجهزة':'هذا المتصفح لا يدعم التعرف على الكلام، استخدم Chrome أو Safari')),
   h('section',{class:'card'},h('h3',null,'فحص الميكروفون'),h('p',{class:'muted small'},'جرّب الميكروفون في الأعلى ثم اضغط «أظهر التفاصيل» وصوّر الشاشة'),diag),
   h('section',{class:'card'},h('h3',null,'النسخ الاحتياطي'),h('p',{class:'muted small'},'تقدمك محفوظ في هذا المتصفح فقط، صدّر نسخة لنقلها لجهاز آخر'),
@@ -1204,6 +1371,7 @@ function viewSettings(m){
 
 // Unlock audio on first interaction (iOS) and refresh voices.
 document.addEventListener('pointerdown',()=>{try{const s=window.speechSynthesis;s&&s.getVoices();}catch{}},{once:true});
+Ear.prefer=S.settings.engine||'auto';
 document.addEventListener('visibilitychange',()=>{if(document.hidden){Ear.cancel();Player.stop();}});
 render();
 window.__APP__={S:()=>S,LEVELS,openLesson,openReview,openLevelTest,openUnitTest,render,setView:v=>{view=v;render();}};
