@@ -182,7 +182,7 @@ textarea{margin:10px 0;font-family:var(--en);font-size:.8rem}
 .sstatus{font-size:.92rem;color:var(--muted);flex:1;max-width:240px}
 .speak[data-state=ok] .sstatus{color:var(--good);font-weight:700}.speak[data-state=bad] .sstatus{color:var(--bad)}
 .heard{min-height:1.6em;font-family:var(--en);text-align:center;color:var(--muted)}.heard.big{font-size:1.2rem;color:var(--ink);padding:8px}
-.diag{display:grid;gap:8px}.diagout{white-space:pre-wrap;word-break:break-all;font-size:.75rem;background:var(--bg);border-radius:10px;padding:8px;margin:0;max-height:320px;overflow:auto}.diagout:empty{display:none}
+.diag{display:grid;gap:8px}.diagout{white-space:pre-wrap;word-break:break-all;font-size:.75rem;background:var(--bg);border-radius:10px;padding:8px;margin:0}.diagout:empty{display:none}
 .michelp{background:var(--bg);border:1px dashed var(--line);border-radius:14px;padding:10px 12px;font-size:.9rem;display:grid;gap:6px}.michelp ul{margin:0;padding-inline-start:18px;color:var(--muted)}.recbox{display:grid;gap:8px;justify-items:center;border-top:1px solid var(--line);padding-top:8px}
 .typewrap{display:flex;gap:8px}.typewrap input{flex:1;min-width:0;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-family:var(--en)}
 .hint{text-align:center;display:grid;gap:4px;justify-items:center}
@@ -452,7 +452,12 @@ const Ear={
    const ch=ab.getChannelData(0);
    // Keep from just before the voice started (with a little lead-in) to the end.
    const from=speech?Math.max(0,Math.floor((speechAt-recStart-700)/1000*ab.sampleRate)):0;
-   return resample(ch.subarray(from),ab.sampleRate,16000);
+   const out=resample(ch.subarray(from),ab.sampleRate,16000);
+   // iPhone microphones often record quietly; bring the voice up to a steady level for the model.
+   let pk=0;for(let i=0;i<out.length;i++){const v=Math.abs(out[i]);if(v>pk)pk=v;}
+   const gain=pk>0?Math.min(20,0.9/pk):1;if(gain>1.05){for(let i=0;i<out.length;i++)out[i]*=gain;}
+   L('audio '+(out.length/16000).toFixed(1)+'s peak '+pk.toFixed(3)+' gain x'+gain.toFixed(1));
+   return out;
   };
   const stopCapture=async reason=>{
    if(done||state!=='listening')return;state='thinking';
@@ -475,14 +480,15 @@ const Ear={
    state='judging';
    let ev=evaluate(text);
    const n=words(expected).length;
-   if(!ev.ok&&mode!=='free'&&n&&n<=3){
+   if(!ev.ok&&mode!=='free'&&n&&n<=14){
     onUpdate({phase:'thinking',text:'',matched:new Set()});
-    try{const g=await Local.gap(audio,expected,text);L('gap '+g.toFixed(2));
-     if(g<=4){const a=align(expected,expected);ev={ok:true,text:expected,matched:a.matched,score:1,missing:[]};}}
+    try{const g=await Local.gap(audio,expected,text);L('gap '+g.toFixed(2)+' (limit '+(n<=3?4:Math.min(9,2.5+0.8*n)).toFixed(1)+')');
+     const lim=n<=3?4:Math.min(9,2.5+0.8*n);
+     if(g<=lim){const a=align(expected,expected);ev={ok:true,text:expected,matched:a.matched,score:1,missing:[]};}}
     catch(e){L('gap error '+(e&&e.message||e));}
     if(done)return;
    }
-   done=true;this.active=null;
+   done=true;this.active=null;L('result '+(ev.ok?'PASS':'FAIL')+(ev.missing&&ev.missing.length?' missing: '+ev.missing.join(' '):''));
    onDone({...ev,reason,error:'',heardSound:true});
   };
   this.active={finish:r=>{stopCapture(r);},cancel:()=>{done=true;release();Local.onProgress=null;}};
@@ -775,7 +781,7 @@ document.addEventListener('click',e=>{if(glossPop&&!glossPop.contains(e.target))
 
 // ---------- Speaking widget ----------
 // Live-highlights each expected word as it is heard; finishes the moment the full target is heard.
-function diagText(){return ['v2.5','engine: '+Ear.engine()+' (pref '+Ear.prefer+')','model: '+(HE.Local.ready()?'ready':HE.Local.loading?'loading '+Math.round(HE.Local.progress*100)+'%':'not loaded')+(HE.Local.error?' err '+HE.Local.error:''),'UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}
+function diagText(){return ['v2.6','engine: '+Ear.engine()+' (pref '+Ear.prefer+')','model: '+(HE.Local.ready()?'ready':HE.Local.loading?'loading '+Math.round(HE.Local.progress*100)+'%':'not loaded')+(HE.Local.error?' err '+HE.Local.error:''),'UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}
 function diagBox(){const out=h('pre',{class:'diagout',dir:'ltr'});return h('div',{class:'diag'},h('button',{type:'button',class:'btn sm ghost',onclick:()=>{out.textContent=diagText();}},'أظهر التفاصيل للمطوّر'),out);}
 function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=true}){
  const box=h('div',{class:'speak'});
