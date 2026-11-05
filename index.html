@@ -182,6 +182,7 @@ textarea{margin:10px 0;font-family:var(--en);font-size:.8rem}
 .sstatus{font-size:.92rem;color:var(--muted);flex:1;max-width:240px}
 .speak[data-state=ok] .sstatus{color:var(--good);font-weight:700}.speak[data-state=bad] .sstatus{color:var(--bad)}
 .heard{min-height:1.6em;font-family:var(--en);text-align:center;color:var(--muted)}.heard.big{font-size:1.2rem;color:var(--ink);padding:8px}
+.diag{display:grid;gap:8px}.diagout{white-space:pre-wrap;word-break:break-all;font-size:.75rem;background:var(--bg);border-radius:10px;padding:8px;margin:0;max-height:320px;overflow:auto}.diagout:empty{display:none}
 .michelp{background:var(--bg);border:1px dashed var(--line);border-radius:14px;padding:10px 12px;font-size:.9rem;display:grid;gap:6px}.michelp ul{margin:0;padding-inline-start:18px;color:var(--muted)}.recbox{display:grid;gap:8px;justify-items:center;border-top:1px solid var(--line);padding-top:8px}
 .typewrap{display:flex;gap:8px}.typewrap input{flex:1;min-width:0;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-family:var(--en)}
 .hint{text-align:center;display:grid;gap:4px;justify-items:center}
@@ -357,7 +358,7 @@ const isIOS=/iPad|iPhone|iPod/.test(UA)||(/Macintosh/.test(UA)&&(global.navigato
 const isStandalone=()=>{try{return !!(global.navigator?.standalone||global.matchMedia?.('(display-mode: standalone)').matches);}catch{return false;}};
 const FATAL=new Set(['not-allowed','service-not-allowed','audio-capture','network','language-not-supported','bad-grammar']);
 const Ear={
- supported:!!SR,isIOS,isAndroid,isStandalone,active:null,
+ supported:!!SR,log:[],isIOS,isAndroid,isStandalone,active:null,
  // mode: 'word' | 'sentence' | 'free'. Calls onUpdate({phase,text,matched}) and onDone(result) once.
  // One listening session can span several recogniser instances: Safari on iPhone and Chrome on Android
  // stop after each short pause (or hear nothing if the speaker was still busy), so the session quietly
@@ -366,13 +367,13 @@ const Ear={
   this.cancel();Player.stop();
   try{const s=global.speechSynthesis;if(s&&(s.speaking||s.pending))s.cancel();}catch{}
   if(!SR){onDone({ok:false,error:'unsupported',text:''});return;}
-  const t0=Date.now();
+  const t0=Date.now();const log=[];this.log=log;const L=m=>{log.push(((Date.now()-t0)/1000).toFixed(1)+'s '+m);if(log.length>60)log.shift();};
   const LIMIT=mode==='word'?(isIOS?12000:9000):mode==='free'?30000:(isIOS?24000:18000);
   const NOS=mode==='word'?(isIOS?9000:7000):(isIOS?11000:9000);
   const T={};let done=false,started=false,r=null,restarts=0;
   let kept=[],finals=[],interim='',alts=[],lastFinal=false,heardAny=false,lastErr='';
   const clear=()=>{for(const k in T)clearTimeout(T[k]);};
-  const detach=x=>{if(x){x.onresult=x.onerror=x.onend=x.onstart=x.onspeechend=x.onaudiostart=x.onsoundstart=null;}};
+  const detach=x=>{if(x){x.onresult=x.onerror=x.onend=x.onstart=x.onspeechend=x.onaudiostart=x.onsoundstart=x.onspeechstart=null;}};
   const candidates=()=>{const base=[...kept,...finals].filter(Boolean).join(' ').trim();const main=(base+' '+interim).trim();return [main,...alts.map(a=>(base+' '+a).trim())].filter(Boolean);};
   const evaluate=()=>{
    const cands=candidates();if(!cands.length)return {ok:false,text:'',matched:new Set(),score:0,missing:words(expected)};
@@ -385,7 +386,7 @@ const Ear={
    return best;
   };
   const finish=reason=>{
-   if(done)return;done=true;clear();this.active=null;
+   if(done)return;L('finish '+reason+' text="'+(evaluate().text||'')+'"');done=true;clear();this.active=null;
    const x=r;r=null;detach(x);try{x&&x.abort();}catch{}
    const ev=evaluate();
    const err=ev.text?'':(reason.startsWith('error:')?reason.slice(6):(lastErr&&FATAL.has(lastErr)?lastErr:'nospeech'));
@@ -393,21 +394,21 @@ const Ear={
   };
   const armSilence=ms=>{clearTimeout(T.sil);T.sil=setTimeout(()=>finish('silence'),ms);};
   const spawn=()=>{
-   let x;try{x=new SR();}catch{finish(started?'end':'error:unsupported');return;}
+   L('spawn #'+(restarts+1));let x;try{x=new SR();}catch{finish(started?'end':'error:unsupported');return;}
    r=x;
    x.lang='en-US';x.interimResults=true;x.maxAlternatives=mode==='word'?5:3;
    // Continuous mode is unreliable on phones; restarting short sessions works everywhere.
    x.continuous=!isIOS&&!isAndroid&&mode!=='word';
    x.onstart=()=>{
-    if(started)return;started=true;clearTimeout(T.boot);
+    L('start');if(started)return;started=true;clearTimeout(T.boot);
     onUpdate({phase:'listening',text:'',matched:new Set()});
     T.nos=setTimeout(()=>{if(!candidates().length)finish('nospeech');},NOS);
     T.max=setTimeout(()=>finish('max'),LIMIT);
    };
-   x.onaudiostart=x.onsoundstart=()=>{heardAny=true;};
+   x.onaudiostart=()=>{L('audiostart');};x.onsoundstart=()=>{L('soundstart');heardAny=true;};x.onspeechstart=()=>{L('speechstart');heardAny=true;};
    x.onresult=e=>{
     if(x!==r)return;
-    heardAny=true;clearTimeout(T.nos);finals=[];interim='';alts=[];lastFinal=false;
+    heardAny=true;clearTimeout(T.nos);try{const q=e.results[e.results.length-1];L('result '+(q&&q.isFinal?'final':'interim')+' "'+(q&&q[0]?q[0].transcript:'')+'"');}catch{}finals=[];interim='';alts=[];lastFinal=false;
     const n=e.results.length;
     // Everything before the last result is a fixed prefix; the last one carries the alternatives.
     for(let i=0;i<n-1;i++)finals.push((e.results[i][0]?.transcript||'').trim());
@@ -423,10 +424,10 @@ const Ear={
     const reachedEnd=mode==='sentence'&&ev.ok&&ev.matched&&ev.matched.has(words(expected).length-1);
     armSilence(mode==='word'?900:mode==='free'?2000:reachedEnd?500:1800);
    };
-   x.onspeechend=()=>{if(x!==r)return;if(candidates().length)armSilence(mode==='free'?900:mode==='sentence'?1200:500);};
-   x.onerror=e=>{if(x!==r)return;lastErr=e.error||'';if(FATAL.has(lastErr))finish('error:'+lastErr);};
+   x.onspeechend=()=>{L('speechend');if(x!==r)return;if(candidates().length)armSilence(mode==='free'?900:mode==='sentence'?1200:500);};
+   x.onerror=e=>{L('error '+(e.error||'?')+(e.message?' '+e.message:''));if(x!==r)return;lastErr=e.error||'';if(FATAL.has(lastErr))finish('error:'+lastErr);};
    x.onend=()=>{
-    if(x!==r||done)return;
+    L('end');if(x!==r||done)return;
     const ev=evaluate();
     if(mode!=='free'&&ev.ok){finish('end');return;}
     if(mode==='word'&&ev.text){finish('end');return;}
@@ -440,7 +441,7 @@ const Ear={
     }
     finish('end');
    };
-   try{x.start();}catch{if(!started)finish('error:start');else finish('end');}
+   try{x.start();}catch(err){L('start() threw '+(err&&err.name||err));if(!started)finish('error:start');else finish('end');}
   };
   T.boot=setTimeout(()=>{if(!started)finish('error:start-timeout');},7000);
   this.active={finish,cancel:()=>{done=true;clear();const x=r;r=null;detach(x);try{x&&x.abort();}catch{}}};
@@ -639,6 +640,7 @@ function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=t
   if(!help.classList.contains('hidden'))return;
   const tips=Ear.isIOS?[
    'انتظر حتى يصير زر الميكروفون أحمر، ثم تكلم بصوت واضح وقريب من الجوال',
+   ...(navigator.brave||/CriOS|FxiOS|EdgiOS/.test(navigator.userAgent)?['أنت تستخدم متصفحًا غير Safari، والتعرف على الكلام في الآيفون يعمل بشكل أفضل في Safari، انسخ الرابط وافتحه في Safari']:[]),
    'فعّل الإملاء: الإعدادات ← عام ← لوحة المفاتيح ← «تفعيل الإملاء»',
    'اسمح للميكروفون: الإعدادات ← Safari ← الميكروفون ← سماح',
    Ear.isStandalone()?'أنت تفتح التطبيق من أيقونة الشاشة الرئيسية، والتعرف على الكلام فيها أضعف، جرّب فتح الرابط في Safari مباشرة':'افصل سماعات البلوتوث إن كانت متصلة',
@@ -1178,6 +1180,8 @@ function viewSettings(m){
   h('input',{type:'checkbox',checked:!!S.settings[key],onchange:e=>{S.settings[key]=e.target.checked;save();}}));
  const rate=h('select',{onchange:e=>{S.settings.rate=+e.target.value;Player.rate=S.settings.rate;save();Player.play('I am a lawyer.');}},
   [[0.85,'أبطأ'],[1,'عادية'],[1.15,'أسرع']].map(([v,t])=>h('option',{value:v,selected:S.settings.rate===v},t)));
+ const diag=h('div',{class:'diag'});const diagOut=h('pre',{class:'diagout',dir:'ltr'});
+ diag.append(h('button',{type:'button',class:'btn sm ghost',onclick:()=>{diagOut.textContent=['v2.3','UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}},'أظهر التفاصيل'),diagOut);
  const micT=h('div');micT.append(speakBox({expected:'I work with clients every day.',onResult:()=>{}}));
  const backup=()=>JSON.stringify(S);
  const ta=h('textarea',{dir:'ltr',rows:'3',placeholder:'الصق هنا نسخة احتياطية لاستعادتها'});
@@ -1187,6 +1191,7 @@ function viewSettings(m){
    h('p',{class:'muted small'},'كلمات وجمل المستويات من 1 إلى 4 بأصوات مسجلة، وجمل المستويين 5 و6 بصوت الجهاز')),
   h('section',{class:'card'},h('h3',null,'اختبر الميكروفون'),h('p',{class:'muted small'},'قل الجملة، وستتلون الكلمات أثناء نطقك وينتهي الاستماع فور اكتمالها'),micT,
    h('p',{class:'muted small'},Ear.supported?'التعرف على الكلام مدعوم في هذا المتصفح، ويحتاج اتصالًا بالإنترنت في أغلب الأجهزة':'هذا المتصفح لا يدعم التعرف على الكلام، استخدم Chrome أو Safari')),
+  h('section',{class:'card'},h('h3',null,'فحص الميكروفون'),h('p',{class:'muted small'},'جرّب الميكروفون في الأعلى ثم اضغط «أظهر التفاصيل» وصوّر الشاشة'),diag),
   h('section',{class:'card'},h('h3',null,'النسخ الاحتياطي'),h('p',{class:'muted small'},'تقدمك محفوظ في هذا المتصفح فقط، صدّر نسخة لنقلها لجهاز آخر'),
    h('div',{class:'row'},h('button',{type:'button',class:'btn sm',onclick:()=>{const b=new Blob([backup()],{type:'application/json'});const a=h('a',{href:URL.createObjectURL(b),download:'hmod-english-backup-'+today()+'.json'});document.body.append(a);a.click();a.remove();}},'تنزيل نسخة'),
     h('button',{type:'button',class:'btn sm ghost',onclick:async()=>{try{await navigator.clipboard.writeText(backup());toast('نسخت البيانات');}catch{ta.value=backup();ta.select();toast('انسخ النص من المربع');}}},'نسخ كنص')),
