@@ -194,6 +194,7 @@ textarea{margin:10px 0;font-family:var(--en);font-size:.8rem}
 .wbar{height:70px;width:16px;background:var(--line);border-radius:8px;display:flex;align-items:flex-end;overflow:hidden}.wbar i{display:block;width:100%;background:var(--accent);border-radius:8px}.wbar i.pass{background:var(--good)}
 .focus{display:grid;gap:8px;text-align:start;margin-top:8px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chip{background:var(--badbg);border-radius:999px;padding:4px 10px;font-size:.85rem}.fline{display:flex;gap:8px;align-items:center;justify-content:space-between}
 .tabs button span{font-size:.72rem}
+.donemark{color:var(--good);font-weight:700}
 .michelp{background:var(--bg);border:1px dashed var(--line);border-radius:14px;padding:10px 12px;font-size:.9rem;display:grid;gap:6px}.michelp ul{margin:0;padding-inline-start:18px;color:var(--muted)}.recbox{display:grid;gap:8px;justify-items:center;border-top:1px solid var(--line);padding-top:8px}
 .typewrap{display:flex;gap:8px}.typewrap input{flex:1;min-width:0;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-family:var(--en)}
 .hint{text-align:center;display:grid;gap:4px;justify-items:center}
@@ -294,7 +295,9 @@ const Player={
  hasClip(t){return !!this.clipId(t);},
  url(id){
   let u=this.blobUrls.get(id);if(u)return u;
-  const b64=this.audio.clips[id];if(!b64)return null;
+  const b64=this.audio.clips[id];
+  // Newer recordings are separate files next to the page (cached by the service worker once played).
+  if(!b64)return 'audio/'+id+'.mp3';
   const bin=atob(b64),bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
   u=URL.createObjectURL(new Blob([bytes],{type:'audio/mpeg'}));this.blobUrls.set(id,u);return u;
  },
@@ -679,10 +682,11 @@ const allWordsOf=lvl=>lvl.units.flatMap(u=>u.lessons.flatMap(l=>l.words));
 // ---------- State ----------
 const KEY='hmod-english-v2';
 const today=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');};
-const blank=()=>({v:2,completed:{},units:{},levels:{},words:{},custom:{},mistakes:[],sents:{},daily:{},contentV:0,days:{},settings:{rate:1,auto:true,slowFirst:false},migrated:false});
+const blank=()=>({v:2,completed:{},units:{},levels:{},words:{},custom:{},mistakes:[],sents:{},daily:{},lpos:{},contentV:0,days:{},settings:{rate:1,auto:true,slowFirst:false},migrated:false});
 let S;
 try{S=Object.assign(blank(),JSON.parse(localStorage.getItem(KEY)||'null')||{});}catch{S=blank();}
 S.settings=Object.assign(blank().settings,S.settings||{});
+S.lpos=S.lpos||{};S.sents=S.sents||{};S.daily=S.daily||{};
 let saveTimer;
 function save(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>{try{localStorage.setItem(KEY,JSON.stringify(S));}catch{toast('تعذر الحفظ في المتصفح، صدّر نسخة احتياطية من الإعدادات');}},150);}
 Player.rate=S.settings.rate;
@@ -1170,6 +1174,9 @@ function openLesson(id){
  const close=h('button',{type:'button',class:'iconbtn','aria-label':'إغلاق'},icon('x'));
  const body=h('div',{class:'sbody'});const foot=h('div',{class:'sfoot'});
  ov.append(h('div',{class:'shead'},close,bar,h('div',{class:'stitle'},l.title)),body,foot);
+ // Where the learner stopped in this lesson, so closing it never sends them back to the start.
+ const pos=()=>S.lpos[id]||(S.lpos[id]={i:0,stage:'learn',passed:[]});
+ const markPassed=n=>{const p=pos();if(!p.passed.includes(n))p.passed.push(n);save();};
  document.body.append(ov);document.body.classList.add('noscroll');
  const shut=()=>{cur?.cancel?.();Player.stop();Ear.cancel();ov.remove();document.body.classList.remove('noscroll');};
  close.addEventListener('click',()=>{shut();render();});
@@ -1181,32 +1188,35 @@ function openLesson(id){
   bar.firstChild.style.width='0';
  }
  function show(n){
-  cur?.cancel?.();i=n;bar.firstChild.style.width=Math.round(i/cards.length*60)+'%';
+  cur?.cancel?.();i=n;if(i<cards.length){const p=pos();p.i=i;p.stage='learn';save();}bar.firstChild.style.width=Math.round(i/cards.length*60)+'%';
   if(i>=cards.length){practice();return;}
   const c=cards[i];body.replaceChildren();
   if(c.k){
    const d=wordData(c.k);
-   const sb=d.ex?speakBox({expected:d.ex.en,mode:'sentence',mustInclude:d.w,onResult:r=>{if(r.ok){addXP(1);setTimeout(()=>show(i+1),900);}}})
-    :speakBox({expected:d.w,mode:'word',showTarget:false,onResult:r=>{if(r.ok){addXP(1);setTimeout(()=>show(i+1),700);}}});cur=sb;
+   const here=i;
+   const sb=d.ex?speakBox({expected:d.ex.en,mode:'sentence',mustInclude:d.w,onResult:r=>{if(r.ok){addXP(1);markPassed(here);setTimeout(()=>{if(i===here)show(here+1);},900);}}})
+    :speakBox({expected:d.w,mode:'word',showTarget:false,onResult:r=>{if(r.ok){addXP(1);markPassed(here);setTimeout(()=>{if(i===here)show(here+1);},700);}}});cur=sb;
    body.append(h('div',{class:'kicker'},'كلمة جديدة '+(l.words.indexOf(c.k)+1)+' من '+l.words.length),
     h('div',{class:'wordcard big'},en(d.w,'bigw'),h('div',{class:'pron'},d.p),h('div',{class:'mean'},d.m),h('div',{class:'row c'},playBtn(d.w,{big:true}),playBtn(d.w,{slow:true}))),
     d.ex?h('div',{class:'excard'},h('div',{class:'row sp'},glossLine(d.ex.en),playBtn(d.ex.en)),h('div',{class:'muted'},d.ex.ar)):null,
-    h('div',{class:'sayit'},h('div',{class:'label'},d.ex?'قل الجملة كاملة':'قلها بصوتك'),sb));
+    h('div',{class:'sayit'},h('div',{class:'label'},d.ex?'قل الجملة كاملة':'قلها بصوتك',pos().passed.includes(i)?h('span',{class:'donemark'},' ✓ نطقتها سابقًا'):null),sb));
    sayAuto(d.w,80);
   }else{
    const s=c.s;
-   const sb=speakBox({expected:s.en,mode:'sentence',onResult:r=>{if(r.ok){addXP(1);setTimeout(()=>show(i+1),900);}}});cur=sb;
+   const here=i;
+   const sb=speakBox({expected:s.en,mode:'sentence',onResult:r=>{if(r.ok){addXP(1);markPassed(here);setTimeout(()=>{if(i===here)show(here+1);},900);}}});cur=sb;
    body.append(h('div',{class:'kicker'},'جملة '+(l.sentences.indexOf(s)+1)+' من '+l.sentences.length),
     h('div',{class:'sentcard'},glossLine(s.en,'bigs'),h('div',{class:'mean'},s.ar),h('div',{class:'row c'},playBtn(s.en,{big:true}),playBtn(s.en,{slow:true}))),
     h('div',{class:'small muted'},'اضغط أي كلمة لترى معناها'),
-    h('div',{class:'sayit'},h('div',{class:'label'},'كرّرها بصوتك'),sb));
+    h('div',{class:'sayit'},h('div',{class:'label'},'كرّرها بصوتك',pos().passed.includes(i)?h('span',{class:'donemark'},' ✓ نطقتها سابقًا'):null),sb));
    sayAuto(s.en,80);
   }
   foot.replaceChildren(h('div',{class:'row'},i>0?h('button',{type:'button',class:'btn ghost',onclick:()=>show(i-1)},'السابق'):null,h('button',{type:'button',class:'btn grow',onclick:()=>show(i+1)},i===cards.length-1?'إلى التمرين':'التالي')));
  }
  function practice(){
-  shut();
+  shut();pos().stage='practice';save();
   runSession({title:'تمرين: '+l.title,items:lessonItems(l),onFinish:score=>{
+   delete S.lpos[id];
    const first=!S.completed[l.id];S.completed[l.id]=today();const now=Date.now();
    for(const k of l.words)if(!S.words[k])S.words[k]=SRS.fresh(now);
    addXP(first?10:4);save();
@@ -1214,6 +1224,9 @@ function openLesson(id){
    return {title:'أنهيت درس «'+l.title+'»',msg:(score<60?'نتيجتك منخفضة، أعد الدرس مرة قبل الانتقال · ':'')+(first?l.words.length+' كلمات أضيفت إلى مراجعتك المتباعدة':'راجعت الدرس مرة أخرى')+(nx?' · التالي: '+nx.label:''),passed:true,retry:()=>openLesson(id)};
   }});
  }
+ const p0=S.lpos[id];
+ if(p0&&p0.stage==='practice'){practice();toast('تابعت إلى التمرين من حيث توقفت');return;}
+ if(p0&&p0.i>0&&p0.i<cards.length){show(p0.i);toast('تابعت من البطاقة '+(p0.i+1)+' من '+cards.length);return;}
  intro();
 }
 function openUnitTest(uid){
@@ -1525,7 +1538,7 @@ function viewSettings(m){
 }
 
 // Unlock audio on first interaction (iOS) and refresh voices.
-document.addEventListener('pointerdown',()=>{try{const s=window.speechSynthesis;s&&s.getVoices();}catch{}},{once:true});
+document.addEventListener('pointerdown',()=>{try{const s=window.speechSynthesis;if(s){s.getVoices();const u=new SpeechSynthesisUtterance(' ');u.volume=0;s.speak(u);}}catch{}},{once:true});
 Ear.prefer=S.settings.engine||'auto';
 document.addEventListener('visibilitychange',()=>{if(document.hidden){Ear.cancel();Player.stop();}});
 render();
