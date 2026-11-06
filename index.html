@@ -195,6 +195,19 @@ textarea{margin:10px 0;font-family:var(--en);font-size:.8rem}
 .focus{display:grid;gap:8px;text-align:start;margin-top:8px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chip{background:var(--badbg);border-radius:999px;padding:4px 10px;font-size:.85rem}.fline{display:flex;gap:8px;align-items:center;justify-content:space-between}
 .tabs button span{font-size:.72rem}
 .donemark{color:var(--good);font-weight:700}
+.chatcta{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:start;border:0;border-radius:var(--r);padding:16px;margin:12px 0;background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;box-shadow:var(--shadow)}
+.chatcta b{display:block;font-size:1.15rem}.chatcta span{font-size:.88rem;opacity:.9}
+.session.chat .chatlog{flex:1;overflow:auto;padding:12px 16px;display:flex;flex-direction:column;gap:12px}
+.cmsg{display:grid;gap:6px;max-width:92%}.cme{align-self:flex-start;justify-items:start}.cbot{align-self:flex-end;justify-items:stretch}
+.cmsg .bub{border-radius:16px;padding:10px 12px;background:var(--card);border:1px solid var(--line);color:var(--ink)}.cme .bub{background:var(--brand);color:#fff;border:0;font-family:var(--en)}
+.bub .ar{margin-top:4px}.typing{color:var(--muted)}
+.fixbox{background:var(--badbg);border-radius:12px;padding:8px 10px;display:grid;gap:4px}.fixbox .play{width:30px;height:30px}.okline{color:var(--good);font-weight:700}
+.nwords{display:grid;gap:6px}.nw{display:flex;gap:8px;align-items:center;background:var(--goodbg);border-radius:12px;padding:6px 10px}.nww{font-weight:700}
+.iconbtn.sm{width:32px;height:32px}
+.chatintro{text-align:center;display:grid;gap:8px;padding:20px 4px}.chatintro .chips{justify-content:center}.chatintro .chip{border:1px solid var(--line);background:var(--card);cursor:pointer}
+.chatfoot{display:grid;gap:6px}.chatbar{display:flex;gap:8px;align-items:center}.chatinp{flex:1;min-width:0;border:1px solid var(--line);border-radius:14px;padding:10px;background:var(--bg);resize:none;max-height:120px}
+.mic.sm{width:46px;height:46px}.vt{display:flex;gap:6px;align-items:center}.chatst:empty{display:none}
+.keyform{display:grid;gap:6px}.keyinp{flex:1;min-width:0;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg)}
 .michelp{background:var(--bg);border:1px dashed var(--line);border-radius:14px;padding:10px 12px;font-size:.9rem;display:grid;gap:6px}.michelp ul{margin:0;padding-inline-start:18px;color:var(--muted)}.recbox{display:grid;gap:8px;justify-items:center;border-top:1px solid var(--line);padding-top:8px}
 .typewrap{display:flex;gap:8px}.typewrap input{flex:1;min-width:0;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-family:var(--en)}
 .hint{text-align:center;display:grid;gap:4px;justify-items:center}
@@ -682,11 +695,11 @@ const allWordsOf=lvl=>lvl.units.flatMap(u=>u.lessons.flatMap(l=>l.words));
 // ---------- State ----------
 const KEY='hmod-english-v2';
 const today=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');};
-const blank=()=>({v:2,completed:{},units:{},levels:{},words:{},custom:{},mistakes:[],sents:{},daily:{},lpos:{},contentV:0,days:{},settings:{rate:1,auto:true,slowFirst:false},migrated:false});
+const blank=()=>({v:2,completed:{},units:{},levels:{},words:{},custom:{},mistakes:[],sents:{},daily:{},lpos:{},chat:[],contentV:0,days:{},settings:{rate:1,auto:true,slowFirst:false},migrated:false});
 let S;
 try{S=Object.assign(blank(),JSON.parse(localStorage.getItem(KEY)||'null')||{});}catch{S=blank();}
 S.settings=Object.assign(blank().settings,S.settings||{});
-S.lpos=S.lpos||{};S.sents=S.sents||{};S.daily=S.daily||{};
+S.lpos=S.lpos||{};S.chat=S.chat||[];S.sents=S.sents||{};S.daily=S.daily||{};
 let saveTimer;
 function save(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>{try{localStorage.setItem(KEY,JSON.stringify(S));}catch{toast('تعذر الحفظ في المتصفح، صدّر نسخة احتياطية من الإعدادات');}},150);}
 Player.rate=S.settings.rate;
@@ -806,7 +819,7 @@ document.addEventListener('click',e=>{if(glossPop&&!glossPop.contains(e.target))
 
 // ---------- Speaking widget ----------
 // Live-highlights each expected word as it is heard; finishes the moment the full target is heard.
-function diagText(){return ['v3.2','engine: '+Ear.engine()+' (pref '+Ear.prefer+')','model: '+(HE.Local.ready()?'ready':HE.Local.loading?'loading '+Math.round(HE.Local.progress*100)+'%':'not loaded')+(HE.Local.error?' err '+HE.Local.error:''),'UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}
+function diagText(){return ['v3.3','engine: '+Ear.engine()+' (pref '+Ear.prefer+')','model: '+(HE.Local.ready()?'ready':HE.Local.loading?'loading '+Math.round(HE.Local.progress*100)+'%':'not loaded')+(HE.Local.error?' err '+HE.Local.error:''),'UA: '+navigator.userAgent,'SR: '+(window.SpeechRecognition?'SpeechRecognition':window.webkitSpeechRecognition?'webkitSpeechRecognition':'none'),'brave: '+!!navigator.brave,'standalone: '+Ear.isStandalone(),'secure: '+window.isSecureContext,'mediaDevices: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia),'--- last session ---',...(Ear.log.length?Ear.log:['(no session yet)'])].join('\n');}
 function diagBox(){const out=h('pre',{class:'diagout',dir:'ltr'});return h('div',{class:'diag'},h('button',{type:'button',class:'btn sm ghost',onclick:()=>{out.textContent=diagText();}},'أظهر التفاصيل للمطوّر'),out);}
 function speakBox({expected,mode='sentence',onResult,showTarget=true,allowType=true,mustInclude=''}){
  const box=h('div',{class:'speak'});
@@ -1472,7 +1485,8 @@ function addWordDialog(){
 }
 // Guided conversations.
 function viewTalk(m){
- m.append(h('header',{class:'phead'},h('h1',null,'المحادثة'),h('p',{class:'muted'},'حوارات موجّهة: تسمع السؤال وترد بصوتك، ثم ينتقل الحوار')));
+ m.append(h('header',{class:'phead'},h('h1',null,'المحادثة'),h('p',{class:'muted'},'سواليف حرة مع مدرّس يصحح لك، وحوارات موجّهة')));
+ m.append(h('button',{type:'button',class:'chatcta',onclick:openChat},h('div',null,h('b',null,'سواليف'),h('span',null,'اكتب أو تكلم بأي موضوع، يرد عليك ويصحح أخطاءك ويشرح الكلمات الجديدة')),icon('chat',26)));
  const sp=h('section',{class:'card'},h('h3',null,'تدريب نطق حر'),h('p',{class:'muted small'},'قل أي جملة بالإنجليزية وسيكتب التطبيق ما سمعه لتتحقق من وضوح نطقك'));
  const out=h('div',{class:'heard big',dir:'ltr'});const mb=h('button',{type:'button',class:'mic'},icon('mic',30));const st=h('div',{class:'sstatus'},'اضغط وتكلّم');let on=false;
  mb.addEventListener('click',()=>{if(on){Ear.stop();return;}on=true;mb.classList.add('live');
@@ -1480,6 +1494,129 @@ function viewTalk(m){
  sp.append(h('div',{class:'microw'},mb,st),out);
  m.append(sp);
  DATA.scenarios.forEach(sc=>m.append(h('button',{type:'button',class:'scen',onclick:()=>openTalk(sc)},h('b',null,sc.title),en(sc.prompt,'muted small'),icon('back',18))));
+}
+// ---------- Free chat with a tutor (Claude) ----------
+// Runs in the browser with the learner's own Claude API key, kept only on this device.
+const SDK_URL='https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@1.1.0/+esm';
+const CHAT_KEY='khotwa-claude-key';
+const getKey=()=>{try{return localStorage.getItem(CHAT_KEY)||'';}catch{return '';}};
+const setKey=v=>{try{v?localStorage.setItem(CHAT_KEY,v):localStorage.removeItem(CHAT_KEY);}catch{}};
+let chatClient=null,chatClientKey='';
+async function tutorClient(){
+ const key=getKey();if(!key)throw new Error('nokey');
+ if(chatClient&&chatClientKey===key)return chatClient;
+ const {default:Anthropic}=await import(SDK_URL);
+ chatClient=new Anthropic({apiKey:key,dangerouslyAllowBrowser:true});chatClientKey=key;return chatClient;
+}
+const TUTOR_SCHEMA={type:'object',additionalProperties:false,required:['reply','reply_ar','correction','new_words'],properties:{
+ reply:{type:'string',description:'Your natural English reply that keeps the conversation going, ending with a question.'},
+ reply_ar:{type:'string',description:'Arabic translation of reply.'},
+ correction:{type:'object',additionalProperties:false,required:['has_mistakes','corrected','explanation_ar'],properties:{
+  has_mistakes:{type:'boolean'},
+  corrected:{type:'string',description:'The learner message rewritten correctly and naturally; empty if no mistakes.'},
+  explanation_ar:{type:'string',description:'Short Arabic explanation of each mistake; empty if none.'}}},
+ new_words:{type:'array',description:'Up to 4 words or phrases from your reply that may be new for this learner.',items:{type:'object',additionalProperties:false,required:['word','meaning_ar','pronunciation_ar'],properties:{
+  word:{type:'string'},meaning_ar:{type:'string'},pronunciation_ar:{type:'string',description:'How to pronounce it, written in Arabic letters with harakat.'}}}}}};
+function tutorSystem(){
+ const L=LEVELS[currentLevelIndex()];
+ const weak=Object.keys(S.words).filter(k=>wordData(k)&&!wordMastered(k)).slice(0,12).map(k=>wordData(k).w);
+ return ['You are a friendly English conversation partner and tutor for Hmod, a Saudi lawyer from Buraidah whose first language is Arabic.',
+  'His level is about '+L.cefr+'. Use vocabulary and grammar a little above that level, short sentences (at most 3), and always end with a question so the chat continues.',
+  'Talk about whatever he wants: work, law, daily life, family, travel, hobbies. Be warm and natural, like a friend.',
+  'If he writes in Arabic, help him say it in English and continue in English.',
+  'Correct every grammar, spelling or word-choice mistake in his latest message. Ignore missing capital letters and punctuation in spoken messages. Keep explanations in simple Arabic.',
+  weak.length?'Words he is learning (use one or two naturally when it fits): '+weak.join(', ')+'.':''].filter(Boolean).join('\n');
+}
+async function askTutor(history){
+ const client=await tutorClient();
+ const res=await client.beta.messages.create({
+  model:'claude-opus-5-5',max_tokens:4000,
+  betas:['server-side-fallback-2026-07-01'],fallbacks:'default',
+  output_config:{effort:'low',format:{type:'json_schema',schema:TUTOR_SCHEMA}},
+  system:tutorSystem(),
+  messages:history.map(m=>({role:m.role,content:m.role==='user'?m.text:JSON.stringify(m.data)})),
+ });
+ if(res.stop_reason==='refusal')throw new Error('refusal');
+ const t=res.content.find(b=>b.type==='text');if(!t)throw new Error('empty');
+ return JSON.parse(t.text);
+}
+function tutorError(e){
+ const st=e&&e.status,msg=String(e&&e.message||e);
+ if(msg==='nokey')return 'أضف مفتاح Claude أولًا';
+ if(st===401||st===403)return 'المفتاح غير صحيح أو غير مفعّل، تحقق منه في الإعدادات';
+ if(st===429)return 'وصلت للحد المسموح مؤقتًا، انتظر قليلًا ثم أعد المحاولة';
+ if(st===400&&/credit|billing|balance/i.test(msg))return 'رصيد حسابك في Claude لا يكفي، اشحن الرصيد من console.anthropic.com';
+ if(msg==='refusal')return 'لم أستطع الرد على هذه الرسالة، جرّب صياغة أخرى';
+ if(!navigator.onLine||/fetch|network/i.test(msg))return 'تحتاج اتصالًا بالإنترنت للسواليف';
+ return 'تعذر الرد الآن، أعد المحاولة';
+}
+function keyForm(onSaved){
+ const inp=h('input',{type:'password',dir:'ltr',placeholder:'sk-ant-…',autocomplete:'off',spellcheck:'false',class:'keyinp'});
+ return h('div',{class:'keyform'},
+  h('p',{class:'small'},'السواليف تعمل بنموذج Claude وتحتاج مفتاح API من حسابك. أنشئه من console.anthropic.com ← API Keys، والتكلفة تُخصم من رصيدك هناك (تقريبًا سنتان أمريكيان لكل رسالة).'),
+  h('p',{class:'small muted'},'المفتاح يُحفظ في هذا الجهاز فقط، ولا يُرسل إلا إلى Anthropic.'),
+  h('div',{class:'row'},inp,h('button',{type:'button',class:'btn sm',onclick:()=>{const v=inp.value.trim();if(!/^sk-ant-/.test(v)){toast('المفتاح يبدأ بـ sk-ant-');return;}setKey(v);chatClient=null;toast('حُفظ المفتاح');onSaved&&onSaved();}},'حفظ')));
+}
+function openChat(){
+ Player.stop();Ear.cancel();
+ const ov=h('div',{class:'session chat'});const close=h('button',{type:'button',class:'iconbtn','aria-label':'إغلاق'},icon('x'));
+ const menu=h('button',{type:'button',class:'link small',onclick:()=>{if(confirm('تبدأ سالفة جديدة؟ تُمسح المحادثة الحالية')){S.chat=[];save();draw();}}},'سالفة جديدة');
+ const log=h('div',{class:'chatlog'});const foot=h('div',{class:'sfoot chatfoot'});
+ ov.append(h('div',{class:'shead'},close,h('div',{class:'stitle'},'سواليف'),menu),log,foot);
+ document.body.append(ov);document.body.classList.add('noscroll');
+ const shut=()=>{Player.stop();Ear.cancel();ov.remove();document.body.classList.remove('noscroll');render();};
+ close.addEventListener('click',shut);
+ let busy=false,speakReplies=true;
+ const addWord=w=>{const k=w.word.toLowerCase().trim();if(!k)return;if(!LEX[k]&&!S.custom[k])S.custom[k]=[w.word,w.meaning_ar,w.pronunciation_ar];if(!S.words[k])S.words[k]=SRS.fresh(Date.now());save();toast('أُضيفت «'+w.word+'» إلى كلماتك');};
+ function bubble(m,i){
+  if(m.role==='user'){
+   const c=S.chat[i+1]&&S.chat[i+1].role==='assistant'?S.chat[i+1].data.correction:null;
+   return h('div',{class:'cmsg cme'},h('div',{class:'bub',dir:'ltr'},m.text),
+    c&&c.has_mistakes?h('div',{class:'fixbox'},h('div',{class:'small'},h('b',null,'الأصح: '),en(c.corrected),playBtn(c.corrected)),c.explanation_ar?h('div',{class:'small muted'},c.explanation_ar):null)
+    :c?h('div',{class:'okline small'},'✓ جملتك صحيحة'):null);
+  }
+  const d=m.data;
+  return h('div',{class:'cmsg cbot'},h('div',{class:'bub'},h('div',{class:'row sp'},glossLine(d.reply),playBtn(d.reply)),h('div',{class:'small muted ar'},d.reply_ar)),
+   d.new_words&&d.new_words.length?h('div',{class:'nwords'},d.new_words.map(w=>h('div',{class:'nw'},
+    h('div',{class:'grow'},h('div',null,en(w.word,'nww'),' · ',w.meaning_ar),h('div',{class:'small muted'},'النطق: ',w.pronunciation_ar)),
+    playBtn(w.word),h('button',{type:'button',class:'iconbtn sm','aria-label':'أضف لكلماتي',title:'أضف لكلماتي',onclick:()=>addWord(w)},icon('plus',16))))):null);
+ }
+ function draw(){
+  log.replaceChildren();
+  if(!S.chat.length)log.append(h('div',{class:'chatintro'},h('b',null,'سولف معي بالإنجليزي 👋'),h('p',{class:'small muted'},'اكتب أو تكلم عن أي موضوع: يومك، شغلك، قضية، سفرة… أرد عليك، وأصحح أخطاءك، وأشرح لك الكلمات الجديدة مع نطقها.'),
+   h('div',{class:'chips'},['Hi! How are you today?','I had a busy day at the court.','Can we talk about my weekend?','كيف أقول: عندي موعد مع عميل بكرة؟'].map(t=>h('button',{type:'button',class:'chip',dir:'auto',onclick:()=>send(t)},t)))));
+  S.chat.forEach((m,i)=>log.append(bubble(m,i)));
+  if(busy)log.append(h('div',{class:'cmsg cbot'},h('div',{class:'bub typing'},'يكتب…')));
+  if(!getKey())log.append(h('div',{class:'card'},keyForm(draw)));
+  setTimeout(()=>log.scrollTop=log.scrollHeight,30);
+ }
+ async function send(text){
+  text=(text||'').trim();if(!text||busy)return;
+  if(!getKey()){toast('أضف مفتاح Claude أولًا');draw();return;}
+  S.chat.push({role:'user',text});if(S.chat.length>40)S.chat=S.chat.slice(-40);save();busy=true;draw();
+  try{
+   const data=await askTutor(S.chat.slice(-20));
+   S.chat.push({role:'assistant',data});save();addXP(2);
+   busy=false;draw();
+   if(speakReplies)Player.play(data.reply);
+  }catch(e){
+   busy=false;S.chat.pop();save();draw();toast(tutorError(e));inp.value=text;
+  }
+ }
+ const inp=h('textarea',{dir:'auto',rows:'1',placeholder:'اكتب بالإنجليزي…',class:'chatinp'});
+ inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const v=inp.value;inp.value='';send(v);}});
+ const sendBtn=h('button',{type:'button',class:'btn sm',onclick:()=>{const v=inp.value;inp.value='';send(v);}},'إرسال');
+ const mb=h('button',{type:'button',class:'mic sm','aria-label':'تكلّم'},icon('mic',22));let on=false;
+ const st=h('div',{class:'small muted chatst'});
+ mb.addEventListener('click',()=>{
+  if(on){Ear.stop();return;}if(!Ear.supported){toast(Ear.errorText('unsupported'));return;}
+  Player.stop();on=true;mb.classList.add('live');
+  Ear.start({mode:'free',onUpdate:u=>{st.textContent=u.phase==='starting'?'لحظة…':u.phase==='thinking'||u.phase==='loading'?'أحلل كلامك…':'تكلّم، وتوقف عند الانتهاء';if(u.text)inp.value=u.text;},
+   onDone:r=>{on=false;mb.classList.remove('live');st.textContent='';if(r.text){inp.value='';send(r.text);}else toast(Ear.errorText(r.error));}});
+ });
+ const voiceT=h('label',{class:'small muted vt'},h('input',{type:'checkbox',checked:true,onchange:e=>{speakReplies=e.target.checked;}}),' اقرأ الردود بصوت');
+ foot.append(st,h('div',{class:'chatbar'},mb,inp,sendBtn),voiceT);
+ draw();
 }
 function openTalk(sc){
  const lines=[sc.prompt,...sc.steps];let i=0;
@@ -1527,6 +1664,7 @@ function viewSettings(m){
   h('section',{class:'card'},h('h3',null,'اختبر الميكروفون'),h('label',{class:'set'},h('div',null,h('b',null,'التعرف على الصوت'),h('span',{class:'muted small'},'«داخل الجهاز» يحمّل نموذجًا مرة واحدة (41 ميغابايت تقريبًا) ويعمل في الآيفون حتى لو لم تسمعك خدمة Safari')),eng),h('p',{class:'muted small'},'قل الجملة، وستتلون الكلمات أثناء نطقك وينتهي الاستماع فور اكتمالها'),micT,
    h('p',{class:'muted small'},Ear.supported?'التعرف على الكلام مدعوم في هذا المتصفح، ويحتاج اتصالًا بالإنترنت في أغلب الأجهزة':'هذا المتصفح لا يدعم التعرف على الكلام، استخدم Chrome أو Safari')),
   h('section',{class:'card'},h('h3',null,'فحص الميكروفون'),h('p',{class:'muted small'},'جرّب الميكروفون في الأعلى ثم اضغط «أظهر التفاصيل» وصوّر الشاشة'),diag),
+  h('section',{class:'card'},h('h3',null,'مفتاح السواليف (Claude)'),getKey()?h('div',null,h('p',{class:'small muted'},'المفتاح محفوظ في هذا الجهاز: '+getKey().slice(0,10)+'…'),h('button',{type:'button',class:'btn sm ghost',onclick:()=>{setKey('');chatClient=null;toast('حُذف المفتاح');render();}},'حذف المفتاح')):keyForm(()=>render())),
   h('section',{class:'card'},h('h3',null,'النسخ الاحتياطي'),h('p',{class:'muted small'},'تقدمك محفوظ في هذا المتصفح فقط، صدّر نسخة لنقلها لجهاز آخر'),
    h('div',{class:'row'},h('button',{type:'button',class:'btn sm',onclick:()=>{const b=new Blob([backup()],{type:'application/json'});const a=h('a',{href:URL.createObjectURL(b),download:'hmod-english-backup-'+today()+'.json'});document.body.append(a);a.click();a.remove();}},'تنزيل نسخة'),
     h('button',{type:'button',class:'btn sm ghost',onclick:async()=>{try{await navigator.clipboard.writeText(backup());toast('نسخت البيانات');}catch{ta.value=backup();ta.select();toast('انسخ النص من المربع');}}},'نسخ كنص')),
